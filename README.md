@@ -1,39 +1,97 @@
-<!--
-This README describes the package. If you publish this package to pub.dev,
-this README's contents appear on the landing page for your package.
+# Reactive Data Manager
 
-For information about how to write a good package README, see the guide for
-[writing package pages](https://dart.dev/guides/libraries/writing-package-pages).
-
-For general information about developing packages, see the Dart guide for
-[creating packages](https://dart.dev/guides/libraries/create-library-packages)
-and the Flutter guide for
-[developing packages and plugins](https://flutter.dev/developing-packages).
--->
-
-TODO: Put a short description of the package here that helps potential users
-know whether this package might be useful for them.
+A Flutter package that provides a robust, reactive data management solution with built-in caching, optimistic updates, and error handling capabilities.
 
 ## Features
 
-TODO: List what your package can do. Maybe include images, gifs, or videos.
+- 🔄 Reactive data streams
+- 💾 Automatic caching
+- ⚡ Optimistic updates
+- 🔍 Data filtering
+- ❌ Error handling
+- 🧹 Automatic resource cleanup
 
-## Getting started
+## Installation
 
-TODO: List prerequisites and provide or point to information on how to
-start using the package.
+Add this to your `pubspec.yaml`:
 
-## Usage
-
-TODO: Include short and useful examples for package users. Add longer examples
-to `/example` folder.
-
-```dart
-const like = 'sample';
+```yaml
+dependencies:
+    reactive_data_manager: ^1.0.0
 ```
 
-## Additional information
+## Basic Usage
 
-TODO: Tell users more about the package: where to find more information, how to
-contribute to the package, how to file issues, what response they can expect
-from the package authors, and more.
+```dart
+// Create a manager instance
+final userManager = ReactiveDataManager<int, User>(
+    fetcher: (id) => fetchUserFromApi(id),
+    updater: (id, user) => updateUserInApi(id, user),
+);
+
+// Get data stream
+Stream<User?> userStream = userManager.getStream(userId);
+
+// Fetch or refresh data
+User user = await userManager.getData(userId);
+
+// Force refresh
+User freshUser = await userManager.getData(userId, forceRefresh: true);
+
+// Update data
+await userManager.updateData(userId, updatedUser);
+```
+
+## Advanced Usage
+
+### With Data Filtering
+
+```dart
+ReactiveDataManager<String, Data>(
+    fetcher: fetchData,
+    updater: updateData,
+    fetchFilter: (key, data) {
+        // Filter fetched data
+        return data.isValid ? data : null;
+    },
+    updateFilter: (key, result) {
+        // Filter update results
+        return result.success ? result.data : null;
+    },
+);
+```
+
+### In Flutter Widgets
+
+```dart
+StreamBuilder<User?>(
+    stream: userManager.getStream(userId),
+    builder: (context, snapshot) {
+        if (snapshot.hasError) {
+            return ErrorWidget(snapshot.error!);
+        }
+        
+        if (!snapshot.hasData) {
+            return LoadingWidget();
+        }
+        
+        return UserWidget(user: snapshot.data!);
+    },
+);
+```
+
+## Cleanup
+
+Don't forget to dispose of the manager when it's no longer needed:
+
+```dart
+@override
+void dispose() {
+    userManager.dispose();
+    super.dispose();
+}
+```
+
+## License
+
+MIT License - see the [LICENSE](LICENSE) file for details
