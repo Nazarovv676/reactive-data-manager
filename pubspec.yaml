@@ -2,6 +2,7 @@ name: reactive_data_manager
 description: "Sync data across the app"
 version: 1.0.0
 homepage:
+repository: https://github.com/Nazarovv676/reactive-data-manager
 
 environment:
   sdk: '>=3.4.4 <4.0.0'
