@@ -31,23 +31,23 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      home: const AdvancedExample(),
       theme: ThemeData(
         primarySwatch: Colors.blue,
         useMaterial3: true,
       ),
+      home: const ReactiveShowcase(),
     );
   }
 }
 
-class AdvancedExample extends StatefulWidget {
-  const AdvancedExample({super.key});
+class ReactiveShowcase extends StatefulWidget {
+  const ReactiveShowcase({super.key});
 
   @override
-  State<AdvancedExample> createState() => _AdvancedExampleState();
+  State<ReactiveShowcase> createState() => _ReactiveShowcaseState();
 }
 
-class _AdvancedExampleState extends State<AdvancedExample> {
+class _ReactiveShowcaseState extends State<ReactiveShowcase> {
   late final ReactiveDataManager<int, User> _userManager;
   final _nameController = TextEditingController();
   final List<int> userIds = List.generate(100, (id) => id);
@@ -90,7 +90,7 @@ class _AdvancedExampleState extends State<AdvancedExample> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Advanced Example')),
+      appBar: AppBar(title: const Text('Example')),
       body: ListView.builder(
         itemCount: userIds.length,
         itemBuilder: (context, index) {

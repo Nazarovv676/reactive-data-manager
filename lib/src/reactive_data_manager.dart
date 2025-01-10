@@ -44,8 +44,8 @@ class ReactiveDataManager<K, T> {
   /// A function that filters data for a specific key.
   final T? Function(K key, T data)? fetchFilter;
 
-  /// A function that updates the filter for a specific key.
-  final Future<dynamic> Function(K key, dynamic result)? updateFilter;
+  /// A function that filters [updater] results for a specific key.
+  final dynamic Function(K key, dynamic result)? updateFilter;
 
   /// Create a new [ReactiveDataManager] instance.
   ReactiveDataManager({
@@ -62,7 +62,7 @@ class ReactiveDataManager<K, T> {
 
   /// Get the current value for a specific key
   T? getCurrentValue(K key) {
-    return _dataSubjects[key]?.value;
+    return _dataSubjects[key]?.valueOrNull;
   }
 
   /// Fetch data safely for a specific key
@@ -75,6 +75,8 @@ class ReactiveDataManager<K, T> {
       return _cache[key]!;
     }
 
+    final oldData = getCurrentValue(key);
+
     // Create a new cancellable fetch operation for this key
     final fetchOperation = CancelableOperation.fromFuture(
       fetcher(key),
@@ -84,9 +86,15 @@ class ReactiveDataManager<K, T> {
     try {
       var result = await fetchOperation.value;
 
-      result = fetchFilter?.call(key, result) ?? result;
-      if (result == null) {
-        throw const DataFilteredException();
+      if (fetchFilter != null) {
+        final filteredResult = fetchFilter!.call(key, result);
+        if (filteredResult != null) {
+          result = filteredResult;
+        } else if (oldData != null) {
+          result = oldData;
+        } else {
+          throw const DataFilteredException();
+        }
       }
 
       _cache[key] = result;
@@ -120,9 +128,15 @@ class ReactiveDataManager<K, T> {
 
     try {
       var result = await updateOperation.value;
-      result = fetchFilter?.call(key, result) ?? result;
-      if (result == null) {
-        throw const DataFilteredException();
+      if (updateFilter != null) {
+        final filteredResult = updateFilter?.call(key, result);
+        if (filteredResult != null) {
+          result = filteredResult;
+        } else if (oldData != null) {
+          result = oldData;
+        } else {
+          throw const DataFilteredException();
+        }
       }
       return result;
     } catch (e) {
