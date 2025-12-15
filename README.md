@@ -5,6 +5,7 @@ A Flutter package that provides a robust, reactive data management solution with
 ## Features
 
 - 🔄 Reactive data streams
+- 📊 Explicit state streams (loading, success, error)
 - 💾 Automatic caching
 - ⚡ Optimistic updates
 - 🔍 Data filtering
@@ -61,7 +62,31 @@ ReactiveDataManager<String, Data>(
 );
 ```
 
+### Explicit State Stream
+
+In addition to `Stream<T?>`, the manager exposes a state-based stream that explicitly represents loading, success, and error states.
+
+This is useful for UI layers that need reliable lifecycle signals.
+
+```dart
+userManager.getStateStream(userId).listen((state) {
+    switch (state) {
+        case ReactiveDataStateLoading():
+            // Show loading indicator
+            break;
+        case ReactiveDataStateSuccess(data: final data):
+            // Display data
+            break;
+        case ReactiveDataStateError(error: final error):
+            // Handle error
+            break;
+    }
+});
+```
+
 ### In Flutter Widgets
+
+#### Using Data Stream
 
 ```dart
 StreamBuilder<User?>(
@@ -76,6 +101,24 @@ StreamBuilder<User?>(
         }
         
         return UserWidget(user: snapshot.data!);
+    },
+);
+```
+
+#### Using State Stream
+
+```dart
+StreamBuilder<ReactiveDataState<User>>(
+    stream: userManager.getStateStream(userId),
+    builder: (context, snapshot) {
+        if (!snapshot.hasData) return const SizedBox();
+        
+        final state = snapshot.data!;
+        return switch (state) {
+            ReactiveDataStateLoading() => const LoadingWidget(),
+            ReactiveDataStateSuccess(data: final user) => UserWidget(user: user),
+            ReactiveDataStateError(error: final error) => ErrorWidget(error: error),
+        };
     },
 );
 ```

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:async/async.dart';
 import 'package:reactive_data_manager/src/exceptions.dart';
+import 'package:reactive_data_manager/src/reactive_data_state.dart';
 import 'package:rxdart/rxdart.dart';
 
 /// A class that manages reactive data fetching and updating with caching and
@@ -25,6 +26,9 @@ import 'package:rxdart/rxdart.dart';
 class ReactiveDataManager<K, T> {
   /// All data streams are stored in a map with the key as the identifier.
   final Map<K, BehaviorSubject<T?>> _dataSubjects = {};
+
+  /// All state streams are stored in a map with the key as the identifier.
+  final Map<K, StreamController<ReactiveDataState<T>>> _stateControllers = {};
 
   /// The cache stores the latest data for each key.
   final Map<K, T> _cache = {};
@@ -60,6 +64,16 @@ class ReactiveDataManager<K, T> {
     return _getSubjectForKey(key).stream;
   }
 
+  /// Get a stream of explicit states for a specific key.
+  ///
+  /// This broadcast-capable stream emits [ReactiveDataState] objects representing
+  /// the current state of data operations (loading, success, or error) for the given key.
+  /// States are emitted when fetching/updating begins ([ReactiveDataStateLoading]),
+  /// succeeds ([ReactiveDataStateSuccess]), or fails ([ReactiveDataStateError]).
+  Stream<ReactiveDataState<T>> getStateStream(K key) {
+    return _getStateControllerForKey(key).stream;
+  }
+
   /// Get the current value for a specific key
   T? getCurrentValue(K key) {
     return _dataSubjects[key]?.valueOrNull;
@@ -76,6 +90,9 @@ class ReactiveDataManager<K, T> {
     }
 
     final oldData = getCurrentValue(key);
+
+    // Emit loading state
+    _getStateControllerForKey(key).add(ReactiveDataStateLoading<T>());
 
     // Create a new cancellable fetch operation for this key
     final fetchOperation = CancelableOperation.fromFuture(
@@ -99,9 +116,13 @@ class ReactiveDataManager<K, T> {
 
       _cache[key] = result;
       _getSubjectForKey(key).add(result);
+      // Emit success state
+      _getStateControllerForKey(key).add(ReactiveDataStateSuccess<T>(result));
       return result;
-    } catch (e) {
+    } catch (e, stackTrace) {
       _getSubjectForKey(key).addError(e);
+      // Emit error state
+      _getStateControllerForKey(key).add(ReactiveDataStateError<T>(e, stackTrace));
       return Future.error(e);
     } finally {
       _activeFetches.remove(key);
@@ -118,6 +139,9 @@ class ReactiveDataManager<K, T> {
     // Update locally and notify listeners
     _cache[key] = newData;
     _getSubjectForKey(key).add(newData);
+
+    // Emit loading state
+    _getStateControllerForKey(key).add(ReactiveDataStateLoading<T>());
 
     // Create a cancellable update operation for this key
     final updateOperation = CancelableOperation.fromFuture(
@@ -138,9 +162,13 @@ class ReactiveDataManager<K, T> {
           throw const DataFilteredException();
         }
       }
+      // Emit success state
+      _getStateControllerForKey(key).add(ReactiveDataStateSuccess<T>(newData));
       return result;
-    } catch (e) {
+    } catch (e, stackTrace) {
       _getSubjectForKey(key).addError(e);
+      // Emit error state
+      _getStateControllerForKey(key).add(ReactiveDataStateError<T>(e, stackTrace));
       return Future.error(e);
     } finally {
       _activeUpdates.remove(key);
@@ -174,6 +202,18 @@ class ReactiveDataManager<K, T> {
     return _dataSubjects[key]!;
   }
 
+  /// Get or create a StreamController for state streams for a specific key.
+  ///
+  /// State controllers are lazily initialized and are broadcast-capable to
+  /// support multiple listeners.
+  StreamController<ReactiveDataState<T>> _getStateControllerForKey(K key) {
+    if (!_stateControllers.containsKey(key)) {
+      _stateControllers[key] = StreamController<ReactiveDataState<T>>.broadcast();
+    }
+
+    return _stateControllers[key]!;
+  }
+
   /// Clear the cache
   void clearCache() {
     _cache.clear();
@@ -193,8 +233,12 @@ class ReactiveDataManager<K, T> {
     for (final subject in _dataSubjects.values) {
       subject.close();
     }
+    for (final controller in _stateControllers.values) {
+      controller.close();
+    }
     _activeFetches.clear();
     _activeUpdates.clear();
     _dataSubjects.clear();
+    _stateControllers.clear();
   }
 }

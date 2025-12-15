@@ -6,3 +6,9 @@ export 'src/exceptions.dart'
         ReactiveDataException,
         OptimisticUpdateException,
         DataFilteredException;
+export 'src/reactive_data_state.dart'
+    show
+        ReactiveDataState,
+        ReactiveDataStateLoading,
+        ReactiveDataStateSuccess,
+        ReactiveDataStateError;
