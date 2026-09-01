@@ -182,6 +182,17 @@ class ReactiveDataManager<K, T> {
     }
   }
 
+  /// Removes the cached value, subject, and any in-flight fetch/update for
+  /// [key] entirely. A later call to [getStream] or [getData] for the same
+  /// key starts completely fresh, with no replay of the old value — unlike
+  /// [clearCache], which resets every key, this only affects [key].
+  void evict(K key) {
+    _activeFetches.remove(key)?.cancel();
+    _activeUpdates.remove(key)?.cancel();
+    _cache.remove(key);
+    _dataSubjects.remove(key)?.close();
+  }
+
   /// Dispose resources
   void dispose() {
     for (final fetch in _activeFetches.values) {

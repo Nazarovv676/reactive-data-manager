@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0 (2026-09-01)
+
+### Added
+- 🗑️ `evict(key)` — removes the cached value, subject, and any in-flight fetch/update for a single key, without resetting every other key the way `clearCache()` does. Useful for callers that key by something derived (e.g. a request minus its pagination params) and need to drop one superseded entry while leaving the rest of the cache intact.
+
 ## 1.0.0 (2025-01-10)
 
 ### Initial Release 🎉
