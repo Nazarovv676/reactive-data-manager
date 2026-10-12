@@ -272,8 +272,10 @@ void main() {
   });
 
   group('cancellation signal', () {
-    test('superseded, invalidated, cleared and evicted fetches get the signal',
-        () async {
+    // M5: invalidate/set/patch no longer fire the signal (deliberate change).
+    test(
+        'superseded, cleared and evicted fetches get the signal, '
+        'invalidated ones do not', () async {
       final gate = Gate();
       final m = ReactiveDataManager<String, int>.cancellable(
         fetcher: gate.call,
@@ -291,7 +293,7 @@ void main() {
       expect(await fired(1), isFalse);
       m.getData('b').ignore(); // #2
       m.invalidate('b');
-      expect(await fired(2), isTrue);
+      expect(await fired(2), isFalse); // result discarded, request not aborted
       m.getData('d').ignore(); // #3
       m.evict('d');
       expect(await fired(3), isTrue);
@@ -300,6 +302,78 @@ void main() {
       m.clearCache();
       expect(await fired(4), isTrue);
       expect(await fired(1), isTrue); // cleared too
+      expect(await fired(2), isFalse); // no longer tracked after invalidate
+    });
+
+    group('M5: what callers of a cancel-honouring fetcher receive', () {
+      late List<Completer<int>> calls;
+      late ReactiveDataManager<String, int> m;
+
+      setUp(() {
+        calls = [];
+        // Like Dio: the request fails with a cancellation error on cancel.
+        m = ReactiveDataManager<String, int>.cancellable(
+          fetcher: (key, cancel) {
+            final c = Completer<int>();
+            calls.add(c);
+            cancel.then((_) {
+              if (!c.isCompleted) c.completeError(const _Cancelled());
+            });
+            return c.future;
+          },
+        );
+      });
+
+      for (final action in <String, void Function(ReactiveDataManager)>{
+        'invalidate': (m) => m.invalidate('k'),
+        'invalidateWhere': (m) => m.invalidateWhere((_) => true),
+        'invalidateAll': (m) => m.invalidateAll(),
+        'set': (m) => m.set('k', 9),
+        'patch': (m) => m.patch('k', (v) => 9),
+        'patchWhere': (m) => m.patchWhere((_, __) => 9),
+      }.entries) {
+        test('${action.key}: pending callers get the result, not an error',
+            () async {
+          m.set('k', 1);
+          final a = m.getData('k', forceRefresh: true);
+          action.value(m);
+          await pump();
+          calls[0].complete(5);
+          expect(await a, 5);
+          expect(m.getCurrentValue('k'), isNot(5)); // result not cached
+        });
+      }
+
+      test('mutate: pending callers get the result', () async {
+        final a = m.getData('k');
+        await m.mutate('k', () async => 'ok');
+        calls[0].complete(5);
+        expect(await a, 5);
+        expect(m.getCurrentValue('k'), isNull);
+      });
+
+      test('forceRefresh: superseded callers get the newer result', () async {
+        final a = m.getData('k');
+        final b = m.getData('k', forceRefresh: true);
+        await pump();
+        calls[1].complete(6);
+        expect(await a, 6);
+        expect(await b, 6);
+      });
+
+      for (final action in <String, void Function(ReactiveDataManager)>{
+        'evict': (m) => m.evict('k'),
+        'clearCache': (m) => m.clearCache(),
+        'dispose': (m) => m.dispose(),
+      }.entries) {
+        test('${action.key}: pending callers receive the cancellation error',
+            () async {
+          final a = m.getData('k');
+          action.value(m);
+          await expectLater(a, throwsA(isA<_Cancelled>()));
+          expect(m.getCurrentValue('k'), isNull);
+        });
+      }
     });
 
     test('deprecated fetcher getter calls the fetcher directly', () async {
@@ -386,9 +460,15 @@ void main() {
         return Completer<int>().future;
       });
       v.getData().ignore();
-      v.invalidate();
       var fired = false;
       signals.single.then((_) => fired = true);
+      // M5 (deliberate change): invalidate no longer aborts the request.
+      v.invalidate();
+      await pump();
+      expect(fired, isFalse);
+      v.getData().ignore();
+      signals.last.then((_) => fired = true);
+      v.clear();
       await pump();
       expect(fired, isTrue);
     });
@@ -555,4 +635,8 @@ class _ThrowingStorage implements ReactiveStorage<String, int> {
   Future<void> delete(String key) => throw StateError('d');
   @override
   Future<void> clear() => throw StateError('c');
+}
+
+class _Cancelled implements Exception {
+  const _Cancelled();
 }

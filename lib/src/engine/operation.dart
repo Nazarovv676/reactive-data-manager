@@ -5,8 +5,8 @@ import 'package:reactive_data_manager/src/engine/abort.dart';
 /// One in-flight operation (a fetch or a page load). Every caller that joins
 /// it shares [future], which completes exactly once.
 ///
-/// A [discard]ed operation must not write its result anywhere; its fetcher is
-/// told through [signal]. [discardWith] additionally releases the callers with
+/// A [discard]ed or [detach]ed operation must not write its result anywhere;
+/// on [discard] its fetcher is told through [signal]. [discardWith] additionally releases the callers with
 /// another result, e.g. the future of the operation that superseded it, so a
 /// superseded operation never leaves its callers hanging.
 class Operation<R> {
@@ -40,10 +40,17 @@ class Operation<R> {
   }
 
   /// Marks the result unwanted and aborts [signal]. Callers still complete
-  /// with the operation's own outcome.
+  /// with the operation's own outcome (with a fetcher that honours the signal
+  /// that is typically its cancellation error).
   void discard() {
     discarded = true;
     _abort.abort();
+  }
+
+  /// Marks the result unwanted without aborting [signal]: the request runs to
+  /// completion and callers receive its outcome, which is not applied.
+  void detach() {
+    discarded = true;
   }
 
   /// Marks the result unwanted, completes the callers with [result] right

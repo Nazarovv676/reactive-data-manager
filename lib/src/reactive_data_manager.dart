@@ -62,8 +62,17 @@ class ReactiveDataManager<K, T> {
   }) : _fetcher = ((key, _) => fetcher(key));
 
   /// Like the default constructor, but the fetcher receives a cancellation
-  /// signal: a future that completes when the fetch is superseded,
-  /// invalidated, cleared or evicted. Wire it to e.g. Dio's `CancelToken`.
+  /// signal: a future that completes when the fetch is superseded (by
+  /// `forceRefresh`/[refresh]), or its key is [evict]ed, [clearCache]d or the
+  /// manager is [dispose]d. Wire it to e.g. Dio's `CancelToken`.
+  ///
+  /// - Superseded: waiting callers complete with the newer fetch's result.
+  /// - Evicted/cleared/disposed: waiting callers complete with the fetcher's
+  ///   own outcome, i.e. the fetcher's cancellation error if it honours the
+  ///   signal.
+  /// - [invalidate], [set], [patch] (and their `Where`/`All` variants) do
+  ///   *not* fire the signal: the request finishes, waiting callers receive
+  ///   its result, and the result is not cached.
   ReactiveDataManager.cancellable({
     required Future<T> Function(K key, Future<void> cancel) fetcher,
     this.updater,
@@ -359,7 +368,7 @@ class ReactiveDataManager<K, T> {
   /// the stream synchronously and [fetchedAt]. A fetch that is in flight is
   /// discarded, so its older response never overwrites [value].
   void set(K key, T value) {
-    _activeFetches.take(key)?.discard();
+    _activeFetches.take(key)?.detach();
     _write(key, value);
   }
 
@@ -370,7 +379,7 @@ class ReactiveDataManager<K, T> {
     if (!_cache.containsKey(key)) return;
     final wasStale = _stale.contains(key);
     final next = transform(_cache[key] as T); // may throw: nothing changed yet
-    _activeFetches.take(key)?.discard();
+    _activeFetches.take(key)?.detach();
     _write(key, next, markFresh: !wasStale);
   }
 
@@ -378,7 +387,7 @@ class ReactiveDataManager<K, T> {
   /// is discarded; the next [getData] fetches again.
   void invalidate(K key) {
     _stale.add(key);
-    _activeFetches.take(key)?.discard();
+    _activeFetches.take(key)?.detach();
   }
 
   /// [invalidate] for every cached key matching [test].
@@ -397,7 +406,7 @@ class ReactiveDataManager<K, T> {
       final next = transform(key, _cache[key] as T);
       if (next == null) continue;
       final wasStale = _stale.contains(key);
-      _activeFetches.take(key)?.discard();
+      _activeFetches.take(key)?.detach();
       _write(key, next, markFresh: !wasStale);
     }
   }
@@ -407,7 +416,7 @@ class ReactiveDataManager<K, T> {
     _invalidatedAllAt = clock();
     _stale.addAll(_cache.keys);
     for (final fetch in _activeFetches.takeAll()) {
-      fetch.discard();
+      fetch.detach();
     }
   }
 
