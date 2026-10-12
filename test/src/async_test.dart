@@ -464,6 +464,82 @@ void main() {
     });
   });
 
+  group('throwing user callbacks never hang a future or wedge a key', () {
+    test('errorMapper: falls back to the raw error, key is reusable', () async {
+      var calls = 0;
+      var fail = true;
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async {
+          calls++;
+          if (fail) throw StateError('raw');
+          return 1;
+        },
+        errorMapper: (e, s) => throw ArgumentError('mapper bug'),
+      );
+      final errors = <Object>[];
+      final sub = m.getStream('k').listen((_) {}, onError: errors.add);
+      final a = m.getData('k');
+      final b = m.getData('k');
+      await expectLater(a, throwsStateError)
+          .timeout(const Duration(seconds: 1));
+      await expectLater(b, throwsStateError)
+          .timeout(const Duration(seconds: 1));
+      expect(calls, 1);
+      expect(errors.single, isA<StateError>());
+      fail = false;
+      expect(await m.getData('k'), 1);
+      expect(calls, 2);
+      await sub.cancel();
+    });
+
+    test('fetchFilter: every caller gets its error, key is reusable', () async {
+      var calls = 0;
+      var bad = true;
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => ++calls,
+        fetchFilter: (_, v) => bad ? throw StateError('filter bug') : v,
+      );
+      final a = m.getData('k');
+      final b = m.getData('k');
+      await expectLater(a, throwsStateError)
+          .timeout(const Duration(seconds: 1));
+      await expectLater(b, throwsStateError)
+          .timeout(const Duration(seconds: 1));
+      bad = false;
+      expect(await m.getData('k'), 2);
+      expect(m.getCurrentValue('k'), 2);
+    });
+
+    test('patch: a throwing transform changes nothing and keeps the fetch',
+        () async {
+      final gate = Gate();
+      final m = ReactiveDataManager<String, int>(fetcher: gate.call);
+      m.set('k', 1);
+      final f = m.getData('k', forceRefresh: true);
+      expect(
+          () => m.patch('k', (_) => throw StateError('x')), throwsStateError);
+      expect(m.getCurrentValue('k'), 1);
+      gate.at(0).complete(2);
+      expect(await f, 2);
+      expect(m.getCurrentValue('k'), 2); // the fetch was not discarded
+    });
+
+    test('a storage adapter throwing synchronously never fails getData',
+        () async {
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => 1,
+        storage: _SyncThrowingStorage(),
+      );
+      expect(await m.getData('k'), 1);
+      m.set('k', 2);
+      m.evict('k');
+      expect(await m.getData('k'), 1);
+      m.clearCache();
+      expect(await m.getData('k'), 1);
+      await pump();
+    });
+  });
+
   group('ReactiveValue async', () {
     test('concurrent getData/watch/refresh share one fetch', () async {
       var n = 0;
@@ -501,6 +577,18 @@ class _SlowStorage extends InMemoryReactiveStorage<String, int> {
     await gate;
     return entries[key];
   }
+}
+
+class _SyncThrowingStorage implements ReactiveStorage<String, int> {
+  @override
+  Future<StoredEntry<int>?> read(String key) => throw StateError('read');
+  @override
+  Future<void> write(String key, StoredEntry<int> entry) =>
+      throw StateError('write');
+  @override
+  Future<void> delete(String key) => throw StateError('delete');
+  @override
+  Future<void> clear() => throw StateError('clear');
 }
 
 class _LoggingStorage implements ReactiveStorage<String, int> {

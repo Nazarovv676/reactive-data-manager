@@ -218,19 +218,19 @@ class ReactiveDataManager<K, T> {
     return fetch;
   }
 
+  /// Runs [fetch]. Whatever the fetcher or a user callback (`errorMapper`,
+  /// `fetchFilter`) does, the lane is released and every caller completes.
   Future<void> _runFetch(K key, Operation<T> fetch) async {
-    T result;
     try {
-      result = await _fetcher(key, fetch.signal.whenAborted);
-    } catch (e, s) {
-      final error = errorMapper?.call(e, s) ?? e;
-      if (!fetch.discarded) _emitError(key, error, s);
-      _finish(key, fetch);
-      fetch.fail(error, s);
-      return;
-    }
-
-    try {
+      T result;
+      try {
+        result = await _fetcher(key, fetch.signal.whenAborted);
+      } catch (e, s) {
+        final error = _mapError(e, s);
+        if (!fetch.discarded) _emitError(key, error, s);
+        fetch.fail(error, s);
+        return;
+      }
       if (!fetch.discarded) {
         final filter = fetchFilter;
         if (filter != null) {
@@ -245,12 +245,24 @@ class ReactiveDataManager<K, T> {
         }
         _write(key, result);
       }
-      _finish(key, fetch);
       fetch.resolve(result);
     } catch (e, s) {
-      _emitError(key, e, s);
-      _finish(key, fetch);
+      if (!fetch.discarded) _emitError(key, e, s);
       fetch.fail(e, s);
+    } finally {
+      _finish(key, fetch);
+    }
+  }
+
+  /// [errorMapper] applied to [error]; a throwing mapper falls back to the raw
+  /// error.
+  Object _mapError(Object error, StackTrace stackTrace) {
+    final mapper = errorMapper;
+    if (mapper == null) return error;
+    try {
+      return mapper(error, stackTrace);
+    } catch (_) {
+      return error;
     }
   }
 
@@ -347,8 +359,9 @@ class ReactiveDataManager<K, T> {
   void patch(K key, T Function(T current) transform) {
     if (!_cache.containsKey(key)) return;
     final wasStale = _stale.contains(key);
+    final next = transform(_cache[key] as T); // may throw: nothing changed yet
     _activeFetches.take(key)?.discard();
-    _write(key, transform(_cache[key] as T), markFresh: !wasStale);
+    _write(key, next, markFresh: !wasStale);
   }
 
   /// Marks [key] stale but keeps its value visible. A fetch that is in flight
