@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:reactive_data_manager/src/data_state.dart';
 import 'package:reactive_data_manager/src/reactive_data_manager.dart';
 import 'package:reactive_data_manager/src/storage.dart';
 
@@ -97,6 +98,10 @@ class ReactiveValue<T> {
 
   /// See [ReactiveDataManager.watch].
   Stream<T> watch({bool fetch = true}) => _manager.watch(_key, fetch: fetch);
+
+  /// See [ReactiveDataManager.watchState].
+  Stream<DataState<T>> watchState({bool fetch = true}) =>
+      _manager.watchState(_key, fetch: fetch);
 
   /// See [ReactiveDataManager.updateData].
   Future<dynamic> updateData(T newData) => _manager.updateData(_key, newData);

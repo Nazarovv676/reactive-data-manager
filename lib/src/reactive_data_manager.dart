@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:reactive_data_manager/src/data_state.dart';
 import 'package:reactive_data_manager/src/engine/entry_registry.dart';
 import 'package:reactive_data_manager/src/engine/errors.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
@@ -217,6 +218,16 @@ class ReactiveDataManager<K, T> {
   );
   bool _disposed = false;
 
+  /// The last failure per key, exposed by [watchState].
+  final Map<K, (Object, StackTrace?)> _errors = {};
+
+  /// [watchState] listeners per key, notified (coalesced, in a microtask)
+  /// whenever something their state depends on changed.
+  final Map<K, Set<void Function()>> _stateListeners = {};
+  final Set<K> _dirty = {};
+  bool _dirtyAll = false;
+  bool _flushScheduled = false;
+
   /// Get a stream for a specific key. With [storage], a persisted value is
   /// restored into the stream when nothing is in memory (no fetch).
   ///
@@ -248,6 +259,126 @@ class ReactiveDataManager<K, T> {
     }, reusable: true)
         .where((value) => value != null)
         .cast<T>();
+  }
+
+  /// The state of [key] as a stream of [DataState] values: the cached value
+  /// together with `isLoading`, the last error, `fetchedAt` and `isStale`.
+  ///
+  /// Emits the current state when listened to, then every change (a fetch
+  /// starting, succeeding or failing, [invalidate], [set]/[patch]/
+  /// [updateData], [clearCache]/[evict], a value restored from storage).
+  /// Equal states are not re-emitted. Errors are part of the state, never
+  /// stream errors, so nothing is replayed to late listeners.
+  ///
+  /// With [fetch] (default) it behaves like [watch]: listening fetches when
+  /// the value is missing or stale. Listening makes [key] watched (see
+  /// [invalidate] and [maxEntries]). Unlike [getStream], the stream survives
+  /// [evict] (it emits the empty state); it closes on [dispose].
+  ///
+  /// `isStale` is evaluated when a state is emitted: reaching [maxAge] alone
+  /// does not emit.
+  ///
+  /// Each call returns a new single-subscription stream.
+  Stream<DataState<T>> watchState(K key, {bool fetch = true}) {
+    StreamSubscription<T?>? subscription;
+    DataState<T>? last;
+    late final StreamController<DataState<T>> controller;
+
+    void emit() {
+      if (controller.isClosed) return;
+      final state = _stateOf(key);
+      if (state == last) return;
+      last = state;
+      controller.add(state);
+    }
+
+    // Listening to the key's subject is what makes the key watched.
+    void attach() {
+      subscription = _getSubjectForKey(key).listen(
+        null,
+        onError: (Object _) {},
+        onDone: () {
+          if (_disposed) {
+            controller.close();
+            return;
+          }
+          // Evicted: follow the key's next subject.
+          attach();
+          emit();
+        },
+      );
+    }
+
+    controller = StreamController<DataState<T>>(
+      onListen: () {
+        if (_disposed) {
+          controller.add(DataState<T>());
+          controller.close();
+          return;
+        }
+        attach();
+        _stateListeners.putIfAbsent(key, () => {}).add(emit);
+        _hydrate(key)?.ignore();
+        if (fetch) getData(key).ignore();
+        emit();
+      },
+      onCancel: () {
+        final listeners = _stateListeners[key];
+        if (listeners != null && listeners.remove(emit) && listeners.isEmpty) {
+          _stateListeners.remove(key);
+        }
+        return subscription?.cancel();
+      },
+    );
+    return controller.stream;
+  }
+
+  DataState<T> _stateOf(K key) {
+    final hasData = _cache.containsKey(key);
+    final error = _errors[key];
+    return DataState<T>(
+      data: _cache[key],
+      hasData: hasData,
+      isLoading: _activeFetches[key] != null || _hydrations.containsKey(key),
+      error: error?.$1,
+      stackTrace: error?.$2,
+      fetchedAt: _fetchedAt[key],
+      isStale: hasData && !isFresh(key),
+    );
+  }
+
+  /// Something [watchState] exposes for [key] may have changed.
+  void _notify(K key) {
+    if (_stateListeners.isEmpty) return;
+    _dirty.add(key);
+    _scheduleFlush();
+  }
+
+  /// Like [_notify], for every key.
+  void _notifyAll() {
+    if (_stateListeners.isEmpty) return;
+    _dirtyAll = true;
+    _scheduleFlush();
+  }
+
+  /// States are computed once the current burst of synchronous work settled,
+  /// so one operation emits one state.
+  void _scheduleFlush() {
+    if (_flushScheduled) return;
+    _flushScheduled = true;
+    scheduleMicrotask(_flush);
+  }
+
+  void _flush() {
+    _flushScheduled = false;
+    final keys = _dirtyAll ? _stateListeners.keys.toList() : _dirty.toList();
+    _dirty.clear();
+    _dirtyAll = false;
+    for (final key in keys) {
+      for (final listener in List.of(_stateListeners[key] ?? const {})) {
+        listener();
+      }
+    }
   }
 
   /// Get the current value for a specific key
@@ -315,6 +446,8 @@ class ReactiveDataManager<K, T> {
     // request: they complete with the newer result right away.
     _activeFetches[key]?.discardWith(fetch.future);
     _activeFetches[key] = fetch;
+    _errors.remove(key);
+    _notify(key);
     _runFetch(key, fetch);
     return fetch;
   }
@@ -355,7 +488,10 @@ class ReactiveDataManager<K, T> {
     }
   }
 
-  void _finish(K key, Operation<T> fetch) => _activeFetches.finish(key, fetch);
+  void _finish(K key, Operation<T> fetch) {
+    _activeFetches.finish(key, fetch);
+    _notify(key);
+  }
 
   /// Update data safely for a specific key.
   ///
@@ -438,6 +574,7 @@ class ReactiveDataManager<K, T> {
             _fetchedAt.remove(key);
             _getSubjectForKey(key).add(null);
             _storage.delete(key);
+            _notify(key);
           }
         }
         throw const OptimisticUpdateException();
@@ -483,6 +620,7 @@ class ReactiveDataManager<K, T> {
       _stale.add(key);
     }
     _activeFetches.take(key)?.detach();
+    _notify(key);
   }
 
   /// [invalidate] for every key matching [test] that is cached, being fetched
@@ -537,6 +675,7 @@ class ReactiveDataManager<K, T> {
     for (final fetch in _activeFetches.takeAll()) {
       fetch.detach();
     }
+    _notifyAll();
     for (final key in _dataSubjects.keys.toList()) {
       _refetchIfWatched(key);
     }
@@ -563,11 +702,15 @@ class ReactiveDataManager<K, T> {
     final fetchedAt = at ?? clock();
     _fetchedAt[key] = fetchedAt;
     if (markFresh) _stale.remove(key);
+    _errors.remove(key);
     _getSubjectForKey(key).add(value);
     _storage.write(key, value, fetchedAt);
+    _notify(key);
   }
 
   void _emitError(K key, Object error, [StackTrace? stackTrace]) {
+    _errors[key] = (error, stackTrace);
+    _notify(key);
     if (replayErrors) {
       _getSubjectForKey(key).addError(error, stackTrace);
     } else {
@@ -616,8 +759,10 @@ class ReactiveDataManager<K, T> {
     _fetchedAt.remove(key);
     _hydrations.remove(key);
     _hydrated.remove(key);
+    _errors.remove(key);
     _dataSubjects.remove(key)?.close();
     _errorChannels.remove(key)?.close();
+    _notify(key);
   }
 
   // --- persistence ---------------------------------------------------------
@@ -631,6 +776,7 @@ class ReactiveDataManager<K, T> {
     final hydration = _Hydration();
     _hydrations[key] = hydration;
     hydration.future = _readStored(key, hydration);
+    _notify(key);
     return hydration.future;
   }
 
@@ -639,6 +785,7 @@ class ReactiveDataManager<K, T> {
     // Evicted or cleared while reading: drop the result.
     if (!identical(_hydrations[key], hydration)) return;
     _hydrations.remove(key);
+    _notify(key);
     if (_cache.containsKey(key)) return; // written meanwhile: memory wins
     if (entry == null || !_storage.accept(key, entry)) {
       _hydrated.add(key); // nothing persisted: do not read again
@@ -686,10 +833,12 @@ class ReactiveDataManager<K, T> {
     _invalidations.clear();
     _hydrations.clear();
     _hydrated.clear();
+    _errors.clear();
     _storage.clear();
     for (final subject in _dataSubjects.values) {
       subject.add(null);
     }
+    _notifyAll();
   }
 
   /// Removes the cached value, subject, and any in-flight fetch/update for
@@ -723,5 +872,6 @@ class ReactiveDataManager<K, T> {
     _dataSubjects.clear();
     _errorChannels.clear();
     _hydrations.clear();
+    _stateListeners.clear();
   }
 }
