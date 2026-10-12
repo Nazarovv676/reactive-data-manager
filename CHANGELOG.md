@@ -6,8 +6,9 @@ This release contains everything since 1.1.0 (the 1.2.0 and 1.3.0 changes were
 never published separately). It is a major version because it changes
 observable behaviour that 1.x callers may depend on (see "Changed (behaviour
 fixes)" and the compatibility notes below): concurrent `getData` calls now join
-instead of cancel, `clearCache`/`evict` discard in-flight results, and
-`updateData` supersede semantics changed. The public API of 1.1.0 is otherwise
+instead of cancel, `clearCache`/`evict` discard in-flight results,
+`updateData` supersede semantics changed, and invalidating a watched key
+refetches it. The public API of 1.1.0 is otherwise
 kept (the `fetcher` field remains as a deprecated getter).
 
 ### Changed (behaviour fixes)
@@ -18,25 +19,32 @@ kept (the `fetcher` field remains as a deprecated getter).
 - `updateData`: a superseded, evicted, cleared or disposed update **completes with its own result** (it used to hang) and no longer emits an error or rolls back. A failed update rolls back only if nothing wrote the key since it started (a newer `set`/`patch`/fetch/update wins), and a fetch that started before the update no longer overwrites the optimistic value (its callers still get its result).
 - `invalidate`, `set`, `patch` (and `invalidateWhere`, `invalidateAll`, `patchWhere`, `mutate`) discard the result of an in-flight fetch **without** firing its cancel signal: callers waiting on it get its result instead of a cancellation error.
 - A throwing `errorMapper` falls back to the raw error, and a throwing `errorMapper`/`fetchFilter` can no longer leave a key's fetch stuck in flight.
+- **Invalidating a watched key refetches it.** A key is watched while its stream (`getStream`, `watch`, `watchState`) has a listener; `invalidate`, `invalidateWhere`, `invalidateAll` and `mutate` now refetch such keys immediately (errors only via the stream), like the paged manager. Unwatched keys are still only marked stale. A watched fetch in flight is detached as before (its callers get its result) and a new one starts.
+- `invalidateWhere` also matches keys that are being fetched or watched but have no cached value (it used to test cached keys only), so their in-flight results are discarded too.
+- `getStream` resolves the key's subject when it is listened to: a stream obtained before the key was evicted (or dropped by `maxEntries`/`evictAfterUnwatched`) keeps working instead of replaying a closed subject. Calls for one key still return an equal stream (safe in `StreamBuilder`); with `replayErrors: false` this is new.
 - The unused `async` dependency was removed.
 
 ### Compatibility notes
 - The public `fetcher` field became private; a **deprecated `fetcher` getter** (`Future<T> Function(K key)`) is kept for 1.1.0 code. It calls the fetcher directly (no cache, no join); for a cancellable fetcher the cancel signal never fires. It will be removed in 2.0.0.
 - `getData` gained the named parameter `maxAge`: subclasses overriding `getData` must add it.
-- About 16 new public members were added to `ReactiveDataManager`; hand-written `implements ReactiveDataManager` fakes must implement them (generated mocks such as mocktail are unaffected).
+- About 20 new public members were added to `ReactiveDataManager`; hand-written `implements ReactiveDataManager` fakes must implement them (generated mocks such as mocktail are unaffected).
 - `replayErrors` defaults to `true` (1.1.0 behaviour); exceptions and existing exports are unchanged.
 
 ### Added — `ReactiveDataManager` / `ReactiveValue`
 - `maxAge` (constructor and per call), injectable `clock`, `fetchedAt(key)`, `isFresh(key)`.
-- `invalidate(key)` / `invalidateWhere(test)` / `invalidateAll()` — stale-while-revalidate: the value stays visible, in-flight results are discarded. With storage they also apply to values restored later.
+- `invalidate(key)` / `invalidateWhere(test)` / `invalidateAll()` — stale-while-revalidate: the value stays visible, in-flight results are discarded, watched keys refetch immediately. With storage they also apply to values restored later.
 - `refresh(key)` — fire-and-forget refetch, errors only via the stream.
+- `prefetch(key)` — fire-and-forget, non-forced `getData`: a no-op when fresh, joins a fetch in flight, errors only via the stream.
+- `watchState(key, {fetch})` and the immutable `DataState<T>` (`data`, `hasData`, `isLoading`, `error`/`stackTrace`, `fetchedAt`, `isStale`, `hasError`, `isLoadingInitial`, `errorAs<E>()`; value equality): the previous data is kept while loading and after a failure, errors are state and never stream errors (nothing is replayed), equal states are not re-emitted, one operation emits one state. The stream survives `evict`, closes on `dispose`, can be listened to several times and is the same object for the same arguments (B6).
+- `maxEntries` (LRU over unwatched keys, at least 1, `ArgumentError` otherwise) and `evictAfterUnwatched` (timer cancelled by a re-watch). Automatic eviction frees memory only: an in-flight fetch is detached, persisted entries (and a pending invalidation of them) are kept. Explicit `evict` still closes the key's subject.
+- `storageReadTimeout` (also on `ReactiveValue` and `ReactivePagedManager`; default `null`, no limit): a storage read slower than this counts as missing and its late result is dropped, so a stuck adapter never blocks `getData`. The limit runs from the read request and includes the wait behind queued writes; a read that times out while queued never reaches the adapter.
 - `watch(key, {fetch})` — non-null `Stream<T>` that fetches when missing or stale.
 - `mutate(key, action, {invalidate})` — invalidates afterwards, also when the action fails.
 - `set(key, value)` / `patch(key, transform)` / `patchWhere(transform)` — plain cache writes, no updater or rollback. An in-flight fetch is discarded so it cannot overwrite them.
 - `replayErrors: false` — do not replay the last error to late subscribers.
 - `errorMapper` — surfaces typed errors on the stream and from `getData`.
 - `ReactiveDataManager.cancellable` — fetcher receiving a cancel signal (`Future<void>`) that completes when the fetch is superseded, evicted, cleared or disposed, e.g. for Dio's `CancelToken`.
-- `ReactiveValue<T>` — keyless single-value manager with the same API; `storageKey` (default `'value'`) lets several values share one storage adapter, and `clear()` deletes only that key.
+- `ReactiveValue<T>` — keyless single-value manager with the same API (including `prefetch()` and `watchState()`); `storageKey` (default `'value'`) lets several values share one storage adapter, and `clear()` deletes only that key.
 - Persistence: `ReactiveStorage`, `StoredEntry`, `InMemoryReactiveStorage`, `storage` / `storageVersion` options (stale-while-revalidate across restarts). `getData`, `watch` (also `fetch: false`) and `getStream` restore a persisted value; storage errors (also synchronous throws) never fail a read; storage is never touched after `dispose()`.
 
 ### Added — `ReactivePagedManager<Q, T, C>`
@@ -48,6 +56,10 @@ Paginated lists, one accumulated list per query:
 - Dedupe by `idOf`, `loadedCount` (also counting the raw items of followed all-duplicate pages within one call), unproductive-page and cursor-loop guards.
 - `patchItem`/`removeItem` across every cached query, `upsertItem` (head/tail, `move`; absent items only at a fully loaded end, never on unloaded or restored-only queries).
 - `invalidate`/`invalidateWhere`/`invalidateAll` (a watched query refetches), `evict`, `clearCache`, `dispose` (later `evict`/`clearCache` are no-ops).
+- `prefetch(query)` — fire-and-forget first-page load when nothing is loaded or the query is stale (invalidated, expired or restored from storage) and no head load runs; never throws.
+- `errorMapper` with the base manager's signature: errors thrown by `fetchPage` are mapped before they reach `PagedError` and `onError`; a throwing mapper falls back to the raw error, an expired cursor is recovered and never mapped.
+- `@visibleForTesting debugCursors(query)`: `(next, previous, pages)` record with the cursors the next `loadNext`/`loadPrevious` would send, or `null` when the query is not cached.
+- A debug-build warning (`dart:developer` log, name `reactive_data_manager`) when an edge is given up after `maxUnproductivePages` unproductive pages.
 - Eviction: `maxEntries` (LRU over unwatched queries), `evictAfterUnwatched`, `Retention.firstPage`; `maxAge`, `onError`, injectable `clock`. `maxEntries`, `maxItems`, `maxRefreshPages` and `maxUnproductivePages` must be at least 1 (`ArgumentError`).
 - `RefreshMode.mergeHead` / `allPages`, `refresh(anchor:)`, `maxItems` windowing, `maxRefreshPages`; exact per-page accounting so windowing and `Retention.firstPage` keep working after splices and replayed edits.
 - `mutate` with optimistic `PagedEdits` and rollback, `invalidateAfter`.
@@ -57,14 +69,11 @@ Paginated lists, one accumulated list per query:
 ### Changed (internal)
 - `ReactiveDataManager`, `ReactiveValue` and `ReactivePagedManager` run on a shared internal engine (`lib/src/engine/`): in-flight operations with abort signals and per-lane join/supersede, freshness against the injectable clock, the serialized storage queue with version checks, and the entry registry (watcher ref-count, `maxEntries` LRU, `evictAfterUnwatched` timers).
 - `fake_async` dev dependency relaxed to `^1.3.1` (Flutter 3.27).
+- `meta: ^1.15.0` added as a dependency (for `@visibleForTesting`; the version pinned by Flutter 3.27).
+- Error mapping lives in `lib/src/engine/errors.dart`, shared by both managers.
 
 ### Not implemented (from the design)
-- `watchState` (a state-object stream for the base manager, B6).
-- A non-forced, fire-and-forget `prefetch` (only `refresh` exists).
-- A debug warning when `maxUnproductivePages` is hit, and a debug assert for calls after `dispose`.
-- `debugCursors` on the paged manager.
-- A shared `mapError` for the paged manager (errors are exposed raw in `PagedError`).
-- Automatic refetch of a watched key on `invalidate` and ref-counted `watch` for the base `ReactiveDataManager` (the paged manager has both).
+- A debug assert for calls after `dispose`. Both managers document calls after `dispose` as safe no-ops (`evict`/`clearCache` on a disposed paged manager, memory-only `evict`/`clearCache` on a disposed base manager, an idle state from paged loads), and existing tests rely on that; an assert would turn these documented no-ops into failures in debug builds, e.g. when widget teardown order calls `evict` after the owner disposed the manager.
 
 ## 1.1.0 (2026-09-01)
 

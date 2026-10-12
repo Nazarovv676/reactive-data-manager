@@ -11,7 +11,8 @@ A Flutter package that provides a robust, reactive data management solution with
 - ❌ Error handling
 - 🧹 Automatic resource cleanup
 - 🤝 In-flight de-duplication (concurrent calls share one fetch)
-- ⏱️ Freshness (`maxAge`), invalidation, `refresh`, `watch`, `mutate`
+- ⏱️ Freshness (`maxAge`), invalidation, `refresh`, `prefetch`, `watch`, `mutate`
+- 📦 `watchState`: one immutable `DataState` value (data + loading + error)
 - 🧩 `ReactiveValue` for keyless values, abortable fetches, typed errors
 - 💽 Optional persistence (stale-while-revalidate across restarts)
 - 📜 `ReactivePagedManager` for paginated lists (pagination, dedupe, cross-query patching, eviction)
@@ -68,6 +69,23 @@ ReactiveDataManager<String, Data>(
 
 ### In Flutter Widgets
 
+`watchState` gives one immutable value per change, with the previous data kept
+while loading and after an error (see [State values](#state-values)):
+
+```dart
+StreamBuilder<DataState<User>>(
+    stream: userManager.watchState(userId),
+    builder: (context, snapshot) {
+        final state = snapshot.data ?? const DataState<User>();
+        if (state.hasData) return UserWidget(user: state.data!);
+        if (state.hasError) return ErrorWidget(state.error!);
+        return LoadingWidget();
+    },
+);
+```
+
+Or the raw value stream:
+
 ```dart
 StreamBuilder<User?>(
     stream: userManager.getStream(userId),
@@ -105,13 +123,16 @@ manager.fetchedAt(id);                              // DateTime?
 manager.isFresh(id);                                // bool
 ```
 
-### Invalidate, refresh, watch, mutate
+### Invalidate, refresh, prefetch, watch, mutate
 
 ```dart
-manager.invalidate(id);   // keep the value visible, refetch on next read;
-manager.invalidateAll();  // results of fetches started before are discarded
+manager.invalidate(id);   // keep the value visible; watched: refetch now,
+manager.invalidateAll();  // otherwise on the next read. Results of fetches
+                          // started before are discarded.
 
-manager.refresh(id);      // fire-and-forget, errors only via the stream
+manager.refresh(id);      // fire-and-forget forced fetch, errors only via the stream
+manager.prefetch(id);     // fire-and-forget getData: no-op when fresh, joins
+                          // a fetch in flight, errors only via the stream
 
 // Non-null stream; fetches when missing/stale, skips `null` events.
 Stream<User> user = manager.watch(id);
@@ -119,6 +140,61 @@ Stream<User> user = manager.watch(id);
 // Runs the action, then invalidates the key even if the action failed.
 await manager.mutate(id, () => api.rename(id, 'Ann'));
 ```
+
+A key is **watched** while its stream (`getStream`, `watch` or `watchState`)
+has a listener. `invalidate`, `invalidateWhere`, `invalidateAll` and `mutate`
+refetch watched keys immediately (like the paged manager); unwatched keys are
+only marked stale and refetch on the next read.
+
+### State values
+
+`watchState(key)` emits a `DataState<T>`, the base manager's counterpart of
+`PagedState`:
+
+```dart
+manager.watchState(id).listen((DataState<User> s) {
+    s.data;        // the cached value, kept while loading and after an error
+    s.hasData;     // "no value yet" vs a value (also a null one)
+    s.isLoading;   // a fetch (or the storage read before it) is in flight
+    s.isLoadingInitial; // loading without data
+    s.error;       // last failure (after errorMapper), s.stackTrace
+    s.errorAs<Failure>(); // typed access, null for other errors
+    s.fetchedAt; s.isStale;
+});
+```
+
+It emits the current state on listen, then every change (fetch start, success
+or failure, `invalidate`, `set`/`patch`/`updateData`, `clearCache`/`evict`, a
+value restored from storage), never two equal states in a row (`DataState`
+has value equality). One operation emits one state. Errors are part of the
+state and are never stream errors, so nothing is replayed to late listeners;
+the error is cleared when the next fetch starts or a value is written. Like
+`watch`, it fetches when the value is missing or stale (`fetch: false` only
+observes). Unlike `getStream`, the stream stays open across `evict` (it emits
+the empty state) and closes on `dispose`. `isStale` is evaluated when a state
+is emitted: reaching `maxAge` alone does not emit. `ReactiveValue` has
+`watchState()` too.
+
+`watchState` and `getStream` return the same stream for the same arguments, so
+calling them in `build` (e.g. `StreamBuilder(stream: manager.watchState(id))`)
+does not resubscribe on every rebuild; each listener gets its own states.
+
+### Memory limits
+
+```dart
+ReactiveDataManager<int, User>(
+    fetcher: fetchUser,
+    maxEntries: 50,                                   // LRU over unwatched keys
+    evictAfterUnwatched: const Duration(minutes: 5),  // timer, cancelled by a re-watch
+);
+```
+
+Watched keys are never evicted. Automatic eviction frees memory only: an
+in-flight fetch of the key is detached (its callers still get its result, which
+is not cached) and a persisted value is kept and restored on the next access.
+Explicit `evict(key)` and `clearCache()` also delete the persisted entries;
+`evict` still closes the key's `getStream` streams. `maxEntries` must be at
+least 1.
 
 `clearCache()` and `evict(key)` also discard in-flight fetches, so a late
 response can never repopulate the cache after a logout.
@@ -148,7 +224,8 @@ back.
 
 `BehaviorSubject` replays the last error to late subscribers. Pass
 `replayErrors: false` to deliver errors only to current listeners. Use
-`errorMapper` to surface typed failures without wrapping/unwrapping:
+`errorMapper` to surface typed failures without wrapping/unwrapping (or use
+`watchState`, where errors are values):
 
 ```dart
 ReactiveDataManager<int, User>(
@@ -186,8 +263,8 @@ its `PageRequest`; both complete/abort under the same rules.
 ### Cross-key operations
 
 `invalidateWhere((key) => ...)` and `patchWhere((key, value) => newValueOrNull)`
-act on every cached key, e.g. for per-page caches where one item lives under
-several keys.
+act on every cached key (`invalidateWhere` also on keys being fetched or
+watched), e.g. for per-page caches where one item lives under several keys.
 
 ### Keyless values
 
@@ -200,6 +277,8 @@ final me = ReactiveValue<User>(
 );
 final user = await me.getData();
 me.watch().listen(print);
+me.watchState().listen((s) => print(s.isLoading));
+me.prefetch();
 ```
 
 With `storage`, a value is persisted under `storageKey` (default `'value'`).
@@ -223,8 +302,23 @@ model change to ignore old entries.
 
 Storage operations run in call order: a read waits for the writes, deletes and
 clears queued before it. `getData` waits for the read of a key it restores, so
-an adapter whose `read` (or an earlier `write`) never completes delays
-`getData` for that key; keep adapters bounded (e.g. with their own timeout).
+an adapter whose `read` (or an earlier `write`) never completes would delay
+`getData` for that key. Bound it with `storageReadTimeout` (all three
+managers):
+
+```dart
+ReactiveDataManager<int, User>(
+    fetcher: fetchUser,
+    storage: PrefsStorage(prefs),
+    storageReadTimeout: const Duration(milliseconds: 300),
+);
+```
+
+A read that takes longer counts as "nothing persisted": the value is fetched
+and the late result is dropped (a timed-out read is not retried while the key
+stays in memory). The limit runs from the read request, so it includes the
+wait behind queued writes; a read that times out while still queued never
+reaches the adapter. Default `null`: no limit.
 
 ```dart
 final manager = ReactiveDataManager<int, User>(
@@ -290,6 +384,7 @@ final events = ReactivePagedManager<EventQuery, Event, int>(
     maxAge: const Duration(minutes: 2),
     maxEntries: 5,                           // LRU over unwatched queries
     evictAfterUnwatched: const Duration(seconds: 30),
+    errorMapper: (error, stack) => Failure.from(error), // before PagedError/onError
     onError: (q, direction, error, stack) => report(error, stack),
     fetchPage: (req) async {
         final page = req.cursor ?? 1;
@@ -316,6 +411,8 @@ events.watch(query).listen((PagedState<Event> s) {
 
 await events.loadNext(query);    // joins an in-flight loadNext; no-op without more pages
 await events.refresh(query);     // first page; previous items stay visible
+events.prefetch(query);          // fire-and-forget first page, only when nothing is
+                                 // loaded or it is stale; never throws
 events.patchItem(id, (e) => e.copyWith(liked: true)); // in EVERY cached query
 events.removeItem(id);
 events.upsertItem(query, event); // e.g. a socket message (head/tail, move: true)
@@ -360,7 +457,8 @@ Rules worth knowing:
   after `limit` or more items were inserted at the head); the price is one
   extra request per load while the list is shifted.
 - A page that adds nothing new is followed up to `maxUnproductivePages` (3)
-  times, then the edge counts as exhausted. A `next` cursor equal to the one
+  times, then the edge counts as exhausted (debug builds log a warning through
+  `dart:developer`, name `reactive_data_manager`). A `next` cursor equal to the one
   just requested exhausts it immediately when the page added items or was
   empty (a page of duplicates is followed, bounded by `maxUnproductivePages`,
   because it advances `loadedCount`). Throw `PageCursorExpiredException`
@@ -377,6 +475,10 @@ Rules worth knowing:
   `retainWhenUnwatched: Retention.firstPage` trims to the first page.
   Watched queries are never evicted; `evict`/`clearCache` reset them in place
   and keep their streams open.
+- `errorMapper` maps errors thrown by `fetchPage` (same signature as the base
+  manager's) before they are stored in `PagedError` and passed to `onError`;
+  read them with `state.refreshError?.errorAs<Failure>()`. A throwing mapper
+  falls back to the raw error; an expired cursor is recovered, never mapped.
 - `maxEntries`, `maxItems`, `maxRefreshPages` and `maxUnproductivePages` must
   be at least 1 (`null` for no limit where allowed); smaller values throw an
   `ArgumentError`. To keep no unwatched query at all, use a short
@@ -440,7 +542,7 @@ immediately with its original `fetchedAt`, marked `isStale`, and revalidated;
 `loadNext` on a restored query refreshes the first page before paging. A faster
 network result wins over a slower read. `evict`/`clearCache` delete persisted
 entries (logout); LRU/timer eviction only frees memory. Storage errors never
-fail a load.
+fail a load. `storageReadTimeout` drops a snapshot that takes longer to read.
 
 ### Testing
 
@@ -455,6 +557,9 @@ final manager = ReactivePagedManager<String, Item, int>(
 final f = manager.loadNext('q');
 pages.completeLast([item], next: 2); // or pages.complete(0, ...), pages.fail(0, e)
 await f;
+
+// @visibleForTesting: the cursors the next loadNext/loadPrevious would send.
+expect(manager.debugCursors('q'), (next: 2, previous: null, pages: 1));
 ```
 
 Mapping common servers to the cursor contract: page + `hasNext` ->
