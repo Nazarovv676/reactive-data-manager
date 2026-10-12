@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as developer;
 
+import 'package:meta/meta.dart';
 import 'package:reactive_data_manager/src/engine/entry_registry.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
 import 'package:reactive_data_manager/src/engine/operation.dart';
@@ -336,6 +337,22 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   /// The queries currently held in memory.
   Iterable<Q> get cachedQueries => List.of(_entries.keys);
+
+  /// The cursors of [query], for tests and debugging only (cursors are not
+  /// part of [PagedState] on purpose): `next` and `previous` are the cursors
+  /// the next [loadNext]/[loadPrevious] would send (`null` at an end, and for
+  /// a snapshot restored from storage), `pages` how many pages are loaded.
+  /// `null` when [query] is not cached.
+  @visibleForTesting
+  ({C? next, C? previous, int pages})? debugCursors(Q query) {
+    final e = _entries[query];
+    if (e == null) return null;
+    return (
+      next: e.nextMore ? e.nextCursor : null,
+      previous: e.prevMore ? e.prevCursor : null,
+      pages: e.pages.length,
+    );
+  }
 
   // --- loading -------------------------------------------------------------
 
