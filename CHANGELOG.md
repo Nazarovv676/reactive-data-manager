@@ -1,10 +1,14 @@
 # Changelog
 
-## 1.3.0 (2026-10-12)
+## 2.0.0 (2026-10-12)
 
-This release contains everything since 1.1.0 (the 1.2.0 changes were never
-published separately). It is source compatible with 1.1.0 for normal use; see
-the compatibility notes below.
+This release contains everything since 1.1.0 (the 1.2.0 and 1.3.0 changes were
+never published separately). It is a major version because it changes
+observable behaviour that 1.x callers may depend on (see "Changed (behaviour
+fixes)" and the compatibility notes below): concurrent `getData` calls now join
+instead of cancel, `clearCache`/`evict` discard in-flight results, and
+`updateData` supersede semantics changed. The public API of 1.1.0 is otherwise
+kept (the `fetcher` field remains as a deprecated getter).
 
 ### Changed (behaviour fixes)
 - `getData` no longer cancels the in-flight fetch. Concurrent calls for one key **join a single fetch** and all complete with its result or error; previously every call hit the fetcher and all but the last future hung forever. Only `forceRefresh: true` starts a new fetch, and callers of the superseded fetch complete with the newer result.
