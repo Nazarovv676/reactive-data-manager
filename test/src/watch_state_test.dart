@@ -531,6 +531,34 @@ void main() {
       });
     });
 
+    test('equal streams per key, each listener gets its own states', () async {
+      final gate = Gate();
+      final m = make(gate);
+      expect(m.watchState('k'), same(m.watchState('k')));
+      expect(m.watchState('k', fetch: false),
+          same(m.watchState('k', fetch: false)));
+      expect(m.watchState('k'), isNot(same(m.watchState('k', fetch: false))));
+      expect(m.getStream('k'), same(m.getStream('k')));
+      final stream = m.watchState('k');
+      final a = Recorder(stream);
+      await pump();
+      gate.calls.single.complete(1);
+      await pump();
+      final b = Recorder(stream); // a second listener on the same stream
+      await pump();
+      expect(a.states, [loading, data(1)]);
+      expect(b.states, [data(1)]);
+      await a.cancel();
+      await b.cancel();
+      // After evict new streams are handed out; the old ones still work.
+      m.evict('k');
+      expect(m.watchState('k'), isNot(same(stream)));
+      final c = Recorder(stream);
+      await pump();
+      expect(c.states, [loading]);
+      await c.cancel();
+    });
+
     test('ReactiveValue.watchState', () async {
       var n = 0;
       final v = ReactiveValue<int>(fetcher: () async => ++n, clock: () => t0);

@@ -218,6 +218,10 @@ class ReactiveDataManager<K, T> {
   );
   bool _disposed = false;
 
+  /// Stable streams handed out by [getStream] and [watchState].
+  final Map<K, Stream<T?>> _streams = {};
+  final Map<(K, bool), Stream<DataState<T>>> _stateStreams = {};
+
   /// The last failure per key, exposed by [watchState].
   final Map<K, (Object, StackTrace?)> _errors = {};
 
@@ -233,10 +237,15 @@ class ReactiveDataManager<K, T> {
   ///
   /// Listening makes [key] watched (see [maxEntries]). The stream resolves
   /// the key's subject when it is listened to, so a stream obtained before
-  /// the key was dropped from memory still works.
+  /// the key was dropped from memory still works. Calls for one key return
+  /// the same stream (safe to call in `build`).
   Stream<T?> getStream(K key) {
     _getSubjectForKey(key);
     _hydrate(key)?.ignore();
+    return _streams.putIfAbsent(key, () => _valueStream(key));
+  }
+
+  Stream<T?> _valueStream(K key) {
     return Rx.defer<T?>(() {
       final subject = _getSubjectForKey(key);
       _hydrate(key)?.ignore();
@@ -278,8 +287,17 @@ class ReactiveDataManager<K, T> {
   /// `isStale` is evaluated when a state is emitted: reaching [maxAge] alone
   /// does not emit.
   ///
-  /// Each call returns a new single-subscription stream.
+  /// The stream can be listened to several times; every listener gets its
+  /// own states, starting with the current one. Calls with the same
+  /// arguments return the same stream (safe to call in `build`).
   Stream<DataState<T>> watchState(K key, {bool fetch = true}) {
+    return _stateStreams.putIfAbsent(
+      (key, fetch),
+      () => Rx.defer(() => _stateStream(key, fetch), reusable: true),
+    );
+  }
+
+  Stream<DataState<T>> _stateStream(K key, bool fetch) {
     StreamSubscription<T?>? subscription;
     DataState<T>? last;
     late final StreamController<DataState<T>> controller;
@@ -760,6 +778,9 @@ class ReactiveDataManager<K, T> {
     _hydrations.remove(key);
     _hydrated.remove(key);
     _errors.remove(key);
+    _streams.remove(key);
+    _stateStreams.remove((key, true));
+    _stateStreams.remove((key, false));
     _dataSubjects.remove(key)?.close();
     _errorChannels.remove(key)?.close();
     _notify(key);
@@ -873,5 +894,7 @@ class ReactiveDataManager<K, T> {
     _errorChannels.clear();
     _hydrations.clear();
     _stateListeners.clear();
+    _streams.clear();
+    _stateStreams.clear();
   }
 }
