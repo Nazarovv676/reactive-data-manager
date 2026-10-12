@@ -9,3 +9,17 @@ export 'src/exceptions.dart'
         ReactiveDataException,
         OptimisticUpdateException,
         DataFilteredException;
+export 'src/paged/paged_types.dart'
+    show
+        AbortSignal,
+        PageDirection,
+        PageRequest,
+        PageResult,
+        PageFetcher,
+        PageCursorExpiredException,
+        PagedError,
+        PagedEdge,
+        PagedState,
+        PagedEnd,
+        Retention;
+export 'src/paged/reactive_paged_manager.dart' show ReactivePagedManager;

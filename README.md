@@ -14,6 +14,7 @@ A Flutter package that provides a robust, reactive data management solution with
 - ⏱️ Freshness (`maxAge`), invalidation, `refresh`, `watch`, `mutate`
 - 🧩 `ReactiveValue` for keyless values, abortable fetches, typed errors
 - 💽 Optional persistence (stale-while-revalidate across restarts)
+- 📜 `ReactivePagedManager` for paginated lists (pagination, dedupe, cross-query patching, eviction)
 
 ## Installation
 
@@ -21,7 +22,7 @@ Add this to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-    reactive_data_manager: ^1.2.0
+    reactive_data_manager: ^1.3.0
 ```
 
 ## Basic Usage
@@ -234,6 +235,98 @@ class PrefsStorage implements ReactiveStorage<int, User> {
     }
 }
 ```
+
+## Paginated lists
+
+`ReactivePagedManager<Q, T, C>` keeps **one accumulated list per query** `Q`
+(filters, sort, ...; it needs value equality and must *not* contain the page).
+`C` is an opaque cursor (page number, offset, token): the package never
+interprets it, `null` means "no more in that direction".
+
+```dart
+final events = ReactivePagedManager<EventQuery, Event, int>(
+    idOf: (e) => e.id,                       // dedupe, patchItem, removeItem
+    maxAge: const Duration(minutes: 2),
+    maxEntries: 5,                           // LRU over unwatched queries
+    evictAfterUnwatched: const Duration(seconds: 30),
+    onError: (q, direction, error, stack) => report(error, stack),
+    fetchPage: (req) async {
+        final page = req.cursor ?? 1;
+        final r = await api.events(req.query, page: page);
+        return PageResult(
+            r.items,
+            next: r.hasNext ? page + 1 : null,
+            previous: page > 1 ? page - 1 : null,
+            totalCount: r.total,
+        );
+    },
+);
+
+// UI: one immutable state value, errors included.
+events.watch(query).listen((PagedState<Event> s) {
+    s.items;              // unmodifiable, never cleared by an error
+    s.hasLoaded;          // "nothing yet" vs "loaded, empty"
+    s.isRefreshing;       // initial load / refresh in flight (items stay)
+    s.refreshError;       // last initial/refresh failure
+    s.next.hasMore;       // also: s.next.isLoading, s.next.error
+    s.previous;           // same for loadPrevious
+    s.totalCount; s.fetchedAt; s.isStale;
+});
+
+await events.loadNext(query);    // joins an in-flight loadNext; no-op without more pages
+await events.refresh(query);     // first page; previous items stay visible
+events.patchItem(id, (e) => e.copyWith(liked: true)); // in EVERY cached query
+events.removeItem(id);
+events.upsertItem(query, event); // e.g. a socket message (head/tail, move: true)
+events.invalidate(query);        // watched: refetch now; otherwise mark stale
+events.evict(query);
+events.clearCache();             // logout: discards in-flight loads
+await events.dispose();
+```
+
+Rules worth knowing:
+
+- Loading futures **never throw and never hang**. They resolve to the state
+  after the operation (or after the one that superseded them); failures are in
+  the state (`refreshError`, `next.error`) and in `onError`. Late subscribers
+  get the state, not a replayed error.
+- Concurrent `loadNext` calls share one request. `loadNext` during a refresh
+  joins it, so a page is never appended to a list that is being replaced.
+  `refresh` aborts running `loadNext`/`loadPrevious`.
+- A load that started before `invalidate`, `refresh`, `evict` or `clearCache`
+  never writes its page. Its request gets an aborted `req.signal` (wire it to
+  Dio's `CancelToken`).
+- Local edits made while a request is in flight are re-applied onto its
+  response (patches, removals, inserts), so an older page cannot undo them.
+- Pages are merged by `idOf`: an id that is already present keeps its position
+  and takes the new value, which absorbs the duplicates that offset pagination
+  produces when the list shifts. Items whose `idOf` is `null` are never
+  deduped. `req.loadedCount` lets offset APIs use `offset = loadedCount`.
+- A page that adds nothing new is followed up to `maxUnproductivePages` (3)
+  times, then the edge counts as exhausted. A `next` cursor equal to the one
+  just requested exhausts it immediately. Throw `PageCursorExpiredException`
+  from the fetcher to refresh the first page instead of failing.
+- `upsertItem` inserts an *absent* item only if that end is fully loaded
+  (`at: head` needs no previous page), otherwise it is ignored.
+- Unwatched queries: `maxEntries` evicts the least recently watched one,
+  `evictAfterUnwatched` evicts after a timer that re-watching cancels, and
+  `retainWhenUnwatched: Retention.firstPage` trims to the first page.
+  Watched queries are never evicted; `evict`/`clearCache` reset them in place
+  and keep their streams open.
+
+Mapping common servers to the cursor contract: page + `hasNext` ->
+`next: hasNext ? page + 1 : null`; offset -> `next: items.length < limit ?
+null : offset + items.length`; opaque token / Relay -> `next: endCursor` or
+`null`; no flag at all -> `next: items.isEmpty ? null : page + 1` (one extra
+request at the end).
+
+**Migrating from `ReactiveDataManager` keyed by query + manual merge:** drop the
+key-stripping helper, the `getCurrentValue` -> API -> `updateData` merge in
+`loadNext`, the `isLoadingMore`/`hasNext`/`page` mirrors in your view model, and
+the "pending eviction" timer. Put the query into `Q`, the request into
+`fetchPage`, and read `items`, `next.hasMore`, `next.isLoading` from the state.
+Per-item patches become `patchItem(id, ...)`, which also reaches the other
+cached queries.
 
 ## Cleanup
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 (2026-10-12)
+
+### Added
+- `ReactivePagedManager<Q, T, C>` — paginated lists, one accumulated list per query:
+  - `watch`, `peek`, `loadNext`, `loadPrevious`, `refresh({anchor})`; loading futures never throw or hang and resolve to a `PagedState`.
+  - `PagedState` (items, `hasLoaded`, `isRefreshing`, `refreshError`, `next`/`previous` edges, `totalCount`, `fetchedAt`, `isStale`); errors live in the state, never replayed as stream errors.
+  - Opaque cursors (`PageRequest`, `PageResult`, `PageFetcher`, `PageDirection`), `AbortSignal`, `PageCursorExpiredException`.
+  - Concurrent `loadNext` joins one request; loads started before `invalidate`/`refresh`/`evict`/`clearCache` never write their page; local edits made in flight are re-applied onto the response.
+  - Dedupe by `idOf`, `loadedCount`, unproductive-page and cursor-loop guards.
+  - `patchItem`/`removeItem` across every cached query, `upsertItem` (head/tail, `move`).
+  - `invalidate`/`invalidateWhere`/`invalidateAll` (a watched query refetches), `evict`, `clearCache`, `dispose`.
+  - Eviction: `maxEntries` (LRU over unwatched queries), `evictAfterUnwatched`, `Retention.firstPage`; `maxAge`, `onError`, injectable `clock`.
+- Not included yet (from the design in the issue): refresh modes `mergeHead`/`allPages`, `maxItems` windowing, optimistic `mutate` with rollback, persistence of paged lists, `testing.dart`.
+
 ## 1.2.0 (2026-10-12)
 
 ### Changed (behaviour fixes)
