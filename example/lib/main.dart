@@ -59,13 +59,13 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
       fetcher: _fetchUser,
       updater: _updateUser,
       maxAge: const Duration(seconds: 30), // cached users expire after 30s
-      replayErrors: false, // late subscribers don't see an old error
+      maxEntries: 40, // keep at most 40 users that are not on screen
     );
 
-    // Prefetch all users; concurrent calls for a key share one fetch and
-    // `ignore()` keeps failures from becoming unhandled zone errors.
-    for (final id in userIds) {
-      _userManager.getData(id).ignore();
+    // Warm the cache for the first rows; concurrent calls for a key share one
+    // fetch and failures only reach the stream.
+    for (final id in userIds.take(20)) {
+      _userManager.prefetch(id);
     }
   }
 
@@ -99,13 +99,9 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
           IconButton(
             tooltip: 'Invalidate all',
             icon: const Icon(Icons.sync_problem),
-            // Keeps the values visible and refetches them on the next read.
-            onPressed: () {
-              _userManager.invalidateAll();
-              for (final id in userIds) {
-                _userManager.getData(id).ignore();
-              }
-            },
+            // Keeps the values visible. Rows on screen (watched) refetch now,
+            // the others when they are shown again.
+            onPressed: _userManager.invalidateAll,
           ),
         ],
       ),
@@ -115,35 +111,43 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
           final userId = userIds[index];
           return Card(
             margin: const EdgeInsets.all(8),
-            child: StreamBuilder<User?>(
-              stream: _userManager.getStream(userId),
+            child: StreamBuilder<DataState<User>>(
+              // Fetches when missing or stale; one immutable state per change.
+              stream: _userManager.watchState(userId),
               builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return ListTile(
-                    title: Text('Error: ${snapshot.error}'),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.refresh),
-                      onPressed: () => _userManager.refresh(userId),
-                    ),
-                  );
-                }
-
-                if (!snapshot.hasData) {
+                final state = snapshot.data ?? const DataState<User>();
+                final user = state.data;
+                if (user == null) {
+                  if (state.hasError) {
+                    return ListTile(
+                      title: Text('Error: ${state.error}'),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.refresh),
+                        onPressed: () => _userManager.refresh(userId),
+                      ),
+                    );
+                  }
                   return const ListTile(
                     title: Center(child: CircularProgressIndicator()),
                   );
                 }
 
-                final user = snapshot.data!;
                 return ListTile(
                   title: Text('Name: ${user.name}'),
                   subtitle: Text(
                     'Age: ${user.age} · fetched '
-                    '${_userManager.fetchedAt(userId)?.toIso8601String() ?? '-'}',
+                    '${state.fetchedAt?.toIso8601String() ?? '-'}'
+                    '${state.isStale ? ' · stale' : ''}'
+                    '${state.hasError ? ' · last refresh failed' : ''}',
                   ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (state.isLoading)
+                        const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
                       IconButton(
                         icon: const Icon(Icons.edit),
                         onPressed: () => _showEditDialog(user),
