@@ -197,6 +197,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
   ///   refreshes the first page before paging. `evict`/`clearCache` delete the
   ///   persisted entries; LRU/timer eviction only drops memory. Storage errors
   ///   never fail a load.
+  /// - [storageReadTimeout]: the longest a storage read may take (`null`, the
+  ///   default: no limit); a slower read counts as "nothing persisted" and its
+  ///   late result is dropped.
   /// - [errorMapper]: converts errors thrown by [fetchPage] into the object
   ///   stored in [PagedError] and passed to [onError] (e.g. unwrap a wrapper
   ///   exception into the app's failure type, then read it with
@@ -220,6 +223,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     this.storage,
     this.persistWhen,
     this.storageVersion = 0,
+    this.storageReadTimeout,
     this.errorMapper,
     this.onError,
     this.clock = DateTime.now,
@@ -275,6 +279,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// Entries persisted with a different version are ignored and deleted.
   final int storageVersion;
 
+  /// The longest a storage read may take before it counts as missing.
+  final Duration? storageReadTimeout;
+
   /// Maps errors thrown by [fetchPage] before they are stored and reported.
   final Object Function(Object error, StackTrace stackTrace)? errorMapper;
 
@@ -295,7 +302,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     evictAfterUnwatched: evictAfterUnwatched,
   );
   late final StorageQueue<Q, PagedSnapshot<T>> _storage =
-      StorageQueue(storage, storageVersion);
+      StorageQueue(storage, storageVersion, readTimeout: storageReadTimeout);
   late final Freshness _freshness = Freshness(clock, maxAge);
   int _tick = 0;
   bool _disposed = false;

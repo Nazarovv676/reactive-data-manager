@@ -8,13 +8,21 @@ import 'package:reactive_data_manager/src/storage.dart';
 /// no-op (or reads `null`) without a [storage].
 class StorageQueue<K, V> {
   /// Creates a queue over [storage]; entries are written with [version].
-  StorageQueue(this.storage, this.version);
+  /// Reads that take longer than [readTimeout] read as `null`.
+  StorageQueue(this.storage, this.version, {this.readTimeout});
 
   /// The adapter, if persistence is enabled.
   final ReactiveStorage<K, V>? storage;
 
   /// The schema version entries are written and accepted with.
   final int version;
+
+  /// The longest a [read] may take (`null`: no limit). It is measured from
+  /// the [read] call, so it also covers the time spent waiting behind queued
+  /// writes: a slow or stuck adapter never holds up a load. A read that times
+  /// out reads as `null` (missing) and its late result is dropped; when it
+  /// was still waiting in the queue, the adapter is not called at all.
+  final Duration? readTimeout;
 
   Future<void> _tail = Future<void>.value();
   bool _closed = false;
@@ -34,7 +42,8 @@ class StorageQueue<K, V> {
   /// Deletes every entry.
   void clear() => _enqueue((s) => s.clear());
 
-  /// Reads the entry for [key]; a failing adapter reads as `null`.
+  /// Reads the entry for [key]; a failing adapter, or one slower than
+  /// [readTimeout], reads as `null`.
   ///
   /// The read runs after every write, delete and clear queued before it, so
   /// it never sees an entry that an earlier `evict`/`clearCache` is about to
@@ -43,11 +52,20 @@ class StorageQueue<K, V> {
     final s = storage;
     if (s == null || _closed) return Future.value();
     final result = Completer<StoredEntry<V>?>();
+    void complete(StoredEntry<V>? entry) {
+      if (!result.isCompleted) result.complete(entry);
+    }
+
+    final limit = readTimeout;
+    final timer = limit == null ? null : Timer(limit, () => complete(null));
     _tail.then((_) async {
+      if (result.isCompleted) return; // timed out while queued
       try {
-        result.complete(await s.read(key));
+        complete(await s.read(key));
       } catch (_) {
-        result.complete(null);
+        complete(null);
+      } finally {
+        timer?.cancel();
       }
     });
     return result.future;

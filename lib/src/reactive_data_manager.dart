@@ -49,6 +49,11 @@ class ReactiveDataManager<K, T> {
   ///   delivered to stream listeners and to the future returned by [getData].
   /// - [storage]/[storageVersion]: optional persistence, see
   ///   [ReactiveStorage].
+  /// - [storageReadTimeout]: the longest a storage read may take (`null`, the
+  ///   default: no limit). A slower read counts as "nothing persisted" (the
+  ///   value is fetched; the late result is dropped), so a slow or stuck
+  ///   adapter never blocks [getData]. Measured from the read request, so it
+  ///   includes the wait behind storage writes queued before it.
   ReactiveDataManager({
     required Future<T> Function(K key) fetcher,
     this.updater,
@@ -60,6 +65,7 @@ class ReactiveDataManager<K, T> {
     this.errorMapper,
     this.storage,
     this.storageVersion = 0,
+    this.storageReadTimeout,
   }) : _fetcher = ((key, _) => fetcher(key));
 
   /// Like the default constructor, but the fetcher receives a cancellation
@@ -85,6 +91,7 @@ class ReactiveDataManager<K, T> {
     this.errorMapper,
     this.storage,
     this.storageVersion = 0,
+    this.storageReadTimeout,
   }) : _fetcher = fetcher;
 
   final Future<T> Function(K key, Future<void> cancel) _fetcher;
@@ -126,6 +133,9 @@ class ReactiveDataManager<K, T> {
   /// Entries persisted with a different version are ignored and deleted.
   final int storageVersion;
 
+  /// The longest a storage read may take before it counts as missing.
+  final Duration? storageReadTimeout;
+
   /// All data streams are stored in a map with the key as the identifier.
   final Map<K, BehaviorSubject<T?>> _dataSubjects = {};
 
@@ -161,7 +171,7 @@ class ReactiveDataManager<K, T> {
   /// Uncached keys whose storage was read and held nothing: not read again.
   final Set<K> _hydrated = {};
   late final StorageQueue<K, T> _storage =
-      StorageQueue(storage, storageVersion);
+      StorageQueue(storage, storageVersion, readTimeout: storageReadTimeout);
   late final Freshness _freshness = Freshness(clock, maxAge);
 
   /// Get a stream for a specific key. With [storage], a persisted value is

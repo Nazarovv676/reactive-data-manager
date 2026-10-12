@@ -22,6 +22,7 @@ class ReactiveValue<T> {
     Object Function(Object error, StackTrace stackTrace)? errorMapper,
     ReactiveStorage<String, T>? storage,
     int storageVersion = 0,
+    Duration? storageReadTimeout,
     String storageKey = 'value',
   })  : _key = storageKey,
         _manager = ReactiveDataManager<String, T>(
@@ -37,6 +38,7 @@ class ReactiveValue<T> {
           errorMapper: errorMapper,
           storage: storage == null ? null : _OwnKey(storage, storageKey),
           storageVersion: storageVersion,
+          storageReadTimeout: storageReadTimeout,
         );
 
   /// Like the default constructor, but the fetcher receives a cancellation
@@ -52,6 +54,7 @@ class ReactiveValue<T> {
     Object Function(Object error, StackTrace stackTrace)? errorMapper,
     ReactiveStorage<String, T>? storage,
     int storageVersion = 0,
+    Duration? storageReadTimeout,
     String storageKey = 'value',
   })  : _key = storageKey,
         _manager = ReactiveDataManager<String, T>.cancellable(
@@ -67,6 +70,7 @@ class ReactiveValue<T> {
           errorMapper: errorMapper,
           storage: storage == null ? null : _OwnKey(storage, storageKey),
           storageVersion: storageVersion,
+          storageReadTimeout: storageReadTimeout,
         );
 
   /// The key this value lives under in its manager and in [storage]. Give
