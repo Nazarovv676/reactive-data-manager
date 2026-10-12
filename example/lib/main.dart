@@ -58,11 +58,14 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
     _userManager = ReactiveDataManager<int, User>(
       fetcher: _fetchUser,
       updater: _updateUser,
+      maxAge: const Duration(seconds: 30), // cached users expire after 30s
+      replayErrors: false, // late subscribers don't see an old error
     );
 
-    // Prefetch all users
+    // Prefetch all users; concurrent calls for a key share one fetch and
+    // `ignore()` keeps failures from becoming unhandled zone errors.
     for (final id in userIds) {
-      _userManager.getData(id);
+      _userManager.getData(id).ignore();
     }
   }
 
@@ -90,7 +93,22 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Example')),
+      appBar: AppBar(
+        title: const Text('Example'),
+        actions: [
+          IconButton(
+            tooltip: 'Invalidate all',
+            icon: const Icon(Icons.sync_problem),
+            // Keeps the values visible and refetches them on the next read.
+            onPressed: () {
+              _userManager.invalidateAll();
+              for (final id in userIds) {
+                _userManager.getData(id).ignore();
+              }
+            },
+          ),
+        ],
+      ),
       body: ListView.builder(
         itemCount: userIds.length,
         itemBuilder: (context, index) {
@@ -105,8 +123,7 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
                     title: Text('Error: ${snapshot.error}'),
                     trailing: IconButton(
                       icon: const Icon(Icons.refresh),
-                      onPressed: () =>
-                          _userManager.getData(userId, forceRefresh: true),
+                      onPressed: () => _userManager.refresh(userId),
                     ),
                   );
                 }
@@ -120,7 +137,10 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
                 final user = snapshot.data!;
                 return ListTile(
                   title: Text('Name: ${user.name}'),
-                  subtitle: Text('Age: ${user.age}'),
+                  subtitle: Text(
+                    'Age: ${user.age} · fetched '
+                    '${_userManager.fetchedAt(userId)?.toIso8601String() ?? '-'}',
+                  ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -130,8 +150,7 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
                       ),
                       IconButton(
                         icon: const Icon(Icons.refresh),
-                        onPressed: () =>
-                            _userManager.getData(userId, forceRefresh: true),
+                        onPressed: () => _userManager.refresh(userId),
                       ),
                     ],
                   ),
@@ -167,7 +186,7 @@ class _ReactiveShowcaseState extends State<ReactiveShowcase> {
           TextButton(
             onPressed: () {
               final updatedUser = user.copyWith(name: _nameController.text);
-              _userManager.updateData(user.id, updatedUser);
+              _userManager.updateData(user.id, updatedUser).ignore();
               Navigator.pop(context);
             },
             child: const Text('Save'),
