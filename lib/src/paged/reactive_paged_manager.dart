@@ -601,8 +601,10 @@ class ReactivePagedManager<Q, T, C extends Object> {
           ));
         } on PageCursorExpiredException {
           if (op.discarded) return;
-          _startHead(
-              e, query); // discards this op and resolves it with the head
+          // Always a first-page refresh, whatever the default refreshMode: a
+          // mergeHead splice would keep the expired tail cursor and allPages
+          // would follow it. Discards this op and resolves it with the head.
+          _startHead(e, query, mode: RefreshMode.firstPage);
           return;
         } catch (error, stack) {
           if (op.discarded) return;

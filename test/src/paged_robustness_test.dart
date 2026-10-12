@@ -198,6 +198,51 @@ void main() {
       await sub.cancel();
     });
   });
+
+  group('M2: an expired cursor always refreshes the first page', () {
+    for (final mode in [RefreshMode.mergeHead, RefreshMode.allPages]) {
+      test('with refreshMode: $mode', () async {
+        final s = Scripted();
+        final m = make(s, mode: mode);
+        await seed(m, s, 'q', items(['a', 'b']), next: 2);
+        final n1 = m.loadNext('q');
+        s.completeLast(items(['c', 'd']), next: 3);
+        await n1;
+        final f = m.loadNext('q');
+        s.failLast(const PageCursorExpiredException());
+        await pump();
+        expect(s.requests.last.direction, PageDirection.initial);
+        expect(s.requests.last.cursor, isNull);
+        s.completeLast(items(['a', 'b']), next: 2);
+        final st = await f.bounded;
+        expect(s.requests, hasLength(4)); // no follow-up page requests
+        expect(s.pending, 0);
+        expect(ids(st), ['a', 'b']);
+        expect(st.next.hasMore, isTrue);
+        // The new cursor is the fresh one, not the expired tail cursor.
+        final n2 = m.loadNext('q');
+        expect(s.requests.last.cursor, 2);
+        s.completeLast(items(['c']));
+        expect(ids(await n2.bounded), ['a', 'b', 'c']);
+        expect(m.peek('q')!.next.hasMore, isFalse);
+      });
+    }
+
+    test('an explicit refresh still uses the default mode', () async {
+      final s = Scripted();
+      final m = make(s, mode: RefreshMode.allPages);
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final n = m.loadNext('q');
+      s.completeLast(items(['b']), next: 3);
+      await n;
+      final r = m.refresh('q');
+      s.completeLast(items(['a']), next: 2);
+      await pump();
+      expect(s.requests.last.direction, PageDirection.next);
+      s.completeLast(items(['b']));
+      expect(ids(await r.bounded), ['a', 'b']);
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {
