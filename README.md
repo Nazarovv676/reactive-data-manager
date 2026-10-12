@@ -313,11 +313,23 @@ Rules worth knowing:
 - Pages are merged by `idOf`: an id that is already present keeps its position
   and takes the new value, which absorbs the duplicates that offset pagination
   produces when the list shifts. Items whose `idOf` is `null` are never
-  deduped. `req.loadedCount` lets offset APIs use `offset = loadedCount`.
+  deduped.
+- Offset APIs: the simplest recipe for `next` is `offset = req.cursor ?? 0`
+  with `next: offset + items.length` (the cursor *is* the offset).
+  Alternatively `offset = req.loadedCount`, the number of items held, which
+  self-heals when items were removed locally. Within one
+  `loadNext`/`loadPrevious` it also counts the raw items of followed pages
+  that added nothing new, so the offset moves past a page of duplicates (e.g.
+  after `limit` or more items were inserted at the head); the price is one
+  extra request per load while the list is shifted.
 - A page that adds nothing new is followed up to `maxUnproductivePages` (3)
   times, then the edge counts as exhausted. A `next` cursor equal to the one
-  just requested exhausts it immediately. Throw `PageCursorExpiredException`
-  from the fetcher to refresh the first page instead of failing.
+  just requested exhausts it immediately when the page added items or was
+  empty (a page of duplicates is followed, bounded by `maxUnproductivePages`,
+  because it advances `loadedCount`). Throw `PageCursorExpiredException`
+  from the fetcher to refresh the first page instead of failing; that
+  recovery is always a `RefreshMode.firstPage` refresh, whatever the
+  `refreshMode`.
 - `upsertItem` inserts an *absent* item only if that end is fully loaded
   (`at: head` needs no previous page), otherwise it is ignored.
 - Unwatched queries: `maxEntries` evicts the least recently watched one,

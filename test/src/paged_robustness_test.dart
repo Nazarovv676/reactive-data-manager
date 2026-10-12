@@ -243,6 +243,92 @@ void main() {
       expect(ids(await r.bounded), ['a', 'b']);
     });
   });
+
+  group('M3: the offset = loadedCount recipe', () {
+    test('moves past an all-duplicate page within one loadNext', () async {
+      // Server list; three items get inserted at the head after page 1.
+      var server = [for (var i = 0; i < 20; i++) 'i$i'];
+      const limit = 3;
+      final requests = <(int?, int)>[];
+      final m = ReactivePagedManager<String, Item, int>(
+        idOf: (i) => i.id,
+        fetchPage: (req) async {
+          final offset =
+              req.direction == PageDirection.initial ? 0 : req.loadedCount;
+          requests.add((req.cursor, offset));
+          final page = server.skip(offset).take(limit).toList();
+          return PageResult(
+            items(page),
+            next: page.length < limit ? null : offset + page.length,
+          );
+        },
+      );
+      expect(ids(await m.refresh('q')), ['i0', 'i1', 'i2']);
+      server = ['n0', 'n1', 'n2', ...server];
+      final st = await m.loadNext('q');
+      expect(requests, [(null, 0), (3, 3), (6, 6)]);
+      expect(ids(st), ['i0', 'i1', 'i2', 'i3', 'i4', 'i5']);
+      expect(st.next.hasMore, isTrue);
+    });
+
+    test('later calls keep moving although the held count lags', () async {
+      var server = [for (var i = 0; i < 12; i++) 'i$i'];
+      const limit = 3;
+      final requests = <(int?, int)>[];
+      final m = ReactivePagedManager<String, Item, int>(
+        idOf: (i) => i.id,
+        fetchPage: (req) async {
+          final offset =
+              req.direction == PageDirection.initial ? 0 : req.loadedCount;
+          requests.add((req.cursor, offset));
+          final page = server.skip(offset).take(limit).toList();
+          return PageResult(
+            items(page),
+            next: page.length < limit ? null : offset + page.length,
+          );
+        },
+      );
+      await m.refresh('q');
+      server = ['n0', 'n1', 'n2', ...server];
+      await m.loadNext('q');
+      // Held: i0..i5 (server 3..8). offset 6 returns duplicates whose next
+      // cursor (9) equals the requested one; the call continues at offset 9.
+      final st = await m.loadNext('q');
+      expect(requests.skip(3), [(9, 6), (9, 9)]);
+      expect(ids(st).skip(6), ['i6', 'i7', 'i8']);
+      expect(st.next.hasMore, isTrue);
+    });
+
+    test('an empty page with the same cursor exhausts the edge immediately',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final f = m.loadNext('q');
+      s.completeLast([], next: 2);
+      final st = await f.bounded;
+      expect(s.requests, hasLength(2));
+      expect(st.next.hasMore, isFalse);
+    });
+
+    test(
+        'duplicates with a cursor that does not move stop after '
+        'maxUnproductivePages', () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final f = m.loadNext('q');
+      for (var i = 0; i < 3; i++) {
+        await pump();
+        expect(s.requests.last.cursor, 2);
+        expect(s.requests.last.loadedCount, 1 + i);
+        s.completeLast(items(['a']), next: 2);
+      }
+      final st = await f.bounded;
+      expect(s.requests, hasLength(4));
+      expect(st.next.hasMore, isFalse);
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {

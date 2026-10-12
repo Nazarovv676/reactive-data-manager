@@ -36,7 +36,9 @@ final class PageRequest<Q, C extends Object> {
 
   /// Number of items currently held for [query] (after dedupe and local
   /// edits). Offset APIs can use `offset = loadedCount`, which self-heals
-  /// when the app removed items locally.
+  /// when the app removed items locally. When one `loadNext`/`loadPrevious`
+  /// follows pages that added nothing new (all duplicates), it also counts the
+  /// raw items of those pages, so the offset keeps moving forward.
   final int loadedCount;
 
   /// Aborted when this request is no longer wanted.

@@ -569,6 +569,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
     final direction = forward ? PageDirection.next : PageDirection.previous;
     var cursor = forward ? e.nextCursor : e.prevCursor;
     var unproductive = 0;
+    // Raw items of the pages this call followed that added nothing: they are
+    // part of `loadedCount` so offset-based fetchers keep moving forward.
+    var consumed = 0;
 
     void clearLane() => e.lanes.take(forward ? _Lane.next : _Lane.previous);
 
@@ -596,7 +599,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
             query: query,
             direction: direction,
             cursor: cursor,
-            loadedCount: e.items.length,
+            loadedCount: e.items.length + consumed,
             signal: op.signal,
           ));
         } on PageCursorExpiredException {
@@ -635,8 +638,13 @@ class ReactivePagedManager<Q, T, C extends Object> {
         }
         if (result.totalCount != null) e.totalCount = result.totalCount;
 
-        if (following != null && following == cursor) {
-          // The cursor did not move: it would loop forever.
+        if (following != null &&
+            following == cursor &&
+            (added > 0 || result.items.isEmpty)) {
+          // The cursor did not move and the next request would repeat this
+          // one: it would loop forever. (A page of duplicates with the same
+          // cursor is followed, bounded below: its items advance
+          // `loadedCount`, which offset-based fetchers use.)
           if (forward) {
             e.nextMore = false;
           } else {
@@ -645,6 +653,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
         } else if (added == 0 && following != null) {
           if (++unproductive < maxUnproductivePages) {
             cursor = following;
+            consumed += result.items.length;
             continue;
           }
           if (forward) {
