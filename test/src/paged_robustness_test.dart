@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:reactive_data_manager/reactive_data_manager.dart';
 import 'package:reactive_data_manager/testing.dart';
@@ -721,6 +723,92 @@ void main() {
       expect(await m.refresh('q'), const PagedState<Item>());
       expect(s.requests, hasLength(1));
     });
+  });
+
+  group('edge lanes in flight at evict / clearCache / invalidate', () {
+    for (final watched in [false, true]) {
+      for (final action in <String, void Function(Manager)>{
+        'evict': (m) => m.evict('q'),
+        'clearCache': (m) => m.clearCache(),
+        'invalidate': (m) => m.invalidate('q'),
+      }.entries) {
+        final name = action.key;
+        test('$name, ${watched ? 'watched' : 'unwatched'}', () async {
+          final s = Scripted();
+          final m = make(s);
+          final states = <PagedState<Item>>[];
+          var done = false;
+          StreamSubscription<PagedState<Item>>? sub;
+          if (watched) {
+            sub = m.watch('q').listen(states.add, onDone: () => done = true);
+            await pump();
+            s.completeLast(items(['a']), next: 2, previous: 0);
+            await pump();
+          } else {
+            await seed(m, s, 'q', items(['a']), next: 2, previous: 0);
+          }
+          final n = m.loadNext('q');
+          final p = m.loadPrevious('q');
+          expect(s.requests, hasLength(3));
+          expect(m.peek('q')!.next.isLoading, isTrue);
+          expect(m.peek('q')!.previous.isLoading, isTrue);
+
+          action.value(m);
+
+          expect(s.requests[1].signal.aborted, isTrue);
+          expect(s.requests[2].signal.aborted, isTrue);
+          final refetches = name == 'invalidate' && watched;
+          expect(s.requests, hasLength(refetches ? 4 : 3));
+          // Late edge responses are never written.
+          s.complete(1, items(['late-next']), next: 3);
+          s.complete(2, items(['late-prev']), previous: -1);
+          if (refetches) s.complete(3, items(['a', 'b']), next: 2);
+          final results = await Future.wait([n.bounded, p.bounded]);
+          await pump();
+          final now = m.peek('q');
+          for (final st in [...results, if (now != null) now]) {
+            expect(st.next.isLoading, isFalse);
+            expect(st.previous.isLoading, isFalse);
+            expect(ids(st), isNot(contains('late-next')));
+            expect(ids(st), isNot(contains('late-prev')));
+          }
+          switch (name) {
+            case 'invalidate' when watched:
+              expect(ids(results[0]), ['a', 'b']); // follow the refetch
+              expect(results[1], same(results[0]));
+              expect(ids(now), ['a', 'b']);
+              expect(now!.isStale, isFalse);
+            case 'invalidate':
+              expect(ids(results[0]), ['a']);
+              expect(results[0].isStale, isTrue);
+              expect(ids(now), ['a']);
+              expect(now!.isStale, isTrue);
+            default:
+              expect(results[0].hasLoaded, isFalse);
+              expect(results[0].items, isEmpty);
+              if (watched) {
+                expect(now!.hasLoaded, isFalse);
+              } else {
+                expect(now, isNull);
+              }
+          }
+          expect(done, isFalse); // a watched stream stays open
+          // The lanes are reusable.
+          final r = m.refresh('q');
+          s.completeLast(items(['x']), next: 9);
+          await r.bounded;
+          final again = m.loadNext('q');
+          expect(s.requests.last.cursor, 9);
+          s.completeLast(items(['y']));
+          expect(ids(await again.bounded), ['x', 'y']);
+          if (watched) {
+            await pump();
+            expect(ids(states.last), ['x', 'y']);
+          }
+          await sub?.cancel();
+        });
+      }
+    }
   });
 }
 
