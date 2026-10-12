@@ -270,10 +270,28 @@ void main() {
         fetcher: (_) async => 1,
         updater: (_, __) => c.future,
       );
-      m.updateData('k', 2).ignore();
+      final u = m.updateData('k', 2);
+      expect(m.getCurrentValue('k'), 2);
       m.dispose();
+      expect(m.getCurrentValue('k'), isNull);
       c.complete(1);
-      await pump();
+      expect(await u, 1); // completes with its own result
+      expect(m.getCurrentValue('k'), isNull); // and touches nothing
+
+      final failing = Completer<int>();
+      final m2 = ReactiveDataManager<String, int>(
+        fetcher: (_) async => 1,
+        updater: (_, __) => failing.future,
+      );
+      await m2.getData('k');
+      final u2 = expectLater(
+        m2.updateData('k', 2),
+        throwsA(isA<OptimisticUpdateException>()),
+      );
+      m2.dispose();
+      failing.completeError(StateError('x'));
+      await u2;
+      expect(m2.getCurrentValue('k'), isNull); // no rollback after dispose
     });
   });
 

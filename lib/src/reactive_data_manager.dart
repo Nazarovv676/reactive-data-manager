@@ -147,6 +147,10 @@ class ReactiveDataManager<K, T> {
   /// Active update operations for each key.
   final Map<K, Object> _activeUpdates = {};
 
+  /// Sequence number of the last write per key (rollback guard).
+  final Map<K, int> _writeSeq = {};
+  int _writes = 0;
+
   final Map<K, _Hydration> _hydrations = {};
   final Set<K> _hydrated = {};
   late final StorageQueue<K, T> _storage =
@@ -290,9 +294,17 @@ class ReactiveDataManager<K, T> {
   /// Update data safely for a specific key.
   ///
   /// The new value is visible immediately. If the [updater] fails the previous
-  /// value is restored and [OptimisticUpdateException] is thrown. An update
-  /// superseded by a newer one (or by `evict`/`dispose`) still completes with
-  /// its own result, but no longer touches the cache.
+  /// value is restored and [OptimisticUpdateException] is thrown.
+  ///
+  /// - A fetch that started before the update is detached like by [set]: its
+  ///   callers still complete with its result, but it never overwrites the
+  ///   optimistic value.
+  /// - The rollback happens only if nothing wrote the key since the update
+  ///   started: a newer [set]/[patch], a fetch that started (and finished)
+  ///   during the update, or a newer update win over the rollback.
+  /// - An update superseded by a newer one (or by `evict`/`clearCache`/
+  ///   `dispose`) still completes with its own result, but no longer touches
+  ///   the cache or the stream.
   Future<dynamic> updateData(K key, T newData) async {
     final token = Object();
     _activeUpdates[key] = token; // supersedes any ongoing update
@@ -301,16 +313,20 @@ class ReactiveDataManager<K, T> {
     final oldFetchedAt = _fetchedAt[key];
     final oldStale = _stale.contains(key);
 
+    // An older response must not overwrite the optimistic value.
+    _activeFetches.take(key)?.detach();
     // Update locally and notify listeners
     _write(key, newData);
+    final written = _writeSeq[key];
 
     bool current() => identical(_activeUpdates[key], token);
+    bool untouched() => current() && _writeSeq[key] == written;
 
     try {
       var result = await _performUpdate(
         key,
         newData,
-        current,
+        untouched,
         oldData,
         oldFetchedAt,
         oldStale,
@@ -338,7 +354,7 @@ class ReactiveDataManager<K, T> {
   Future<dynamic> _performUpdate(
     K key,
     T newData,
-    bool Function() current,
+    bool Function() canRollback,
     T? oldData,
     DateTime? oldFetchedAt,
     bool oldStale,
@@ -347,7 +363,7 @@ class ReactiveDataManager<K, T> {
       try {
         return await updater!(key, newData);
       } catch (e) {
-        if (current()) {
+        if (canRollback()) {
           if (oldData != null) {
             _write(key, oldData, at: oldFetchedAt);
             if (oldStale) _stale.add(key);
@@ -436,6 +452,7 @@ class ReactiveDataManager<K, T> {
 
   void _write(K key, T value, {DateTime? at, bool markFresh = true}) {
     _cache[key] = value;
+    _writeSeq[key] = ++_writes;
     final fetchedAt = at ?? clock();
     _fetchedAt[key] = fetchedAt;
     if (markFresh) _stale.remove(key);
@@ -493,12 +510,15 @@ class ReactiveDataManager<K, T> {
 
   // --- lifecycle -----------------------------------------------------------
 
-  /// Clear the cache. Fetches that are in flight are discarded and persisted
-  /// entries are deleted.
+  /// Clear the cache. Fetches that are in flight are discarded (their signal
+  /// fires), running [updateData] calls no longer touch the cache (no late
+  /// rollback), and persisted entries are deleted.
   void clearCache() {
     for (final fetch in _activeFetches.takeAll()) {
       fetch.discard();
     }
+    _activeUpdates.clear(); // a late rollback must not resurrect old data
+    _writeSeq.clear();
     _cache.clear();
     _fetchedAt.clear();
     _stale.clear();
@@ -519,6 +539,7 @@ class ReactiveDataManager<K, T> {
   void evict(K key) {
     _activeFetches.take(key)?.discard();
     _activeUpdates.remove(key);
+    _writeSeq.remove(key);
     _cache.remove(key);
     _fetchedAt.remove(key);
     _stale.remove(key);

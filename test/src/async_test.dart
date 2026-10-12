@@ -171,8 +171,11 @@ void main() {
   });
 
   group('interleaving with updateData', () {
-    test('a fetch finishing during an update overwrites the optimistic value',
-        () async {
+    // m2 (deliberate change): a fetch that started before the update used to
+    // overwrite the optimistic value. It is now detached like by set().
+    test(
+        'a fetch started before an update never overwrites the optimistic '
+        'value; its callers still complete', () async {
       final gate = Gate();
       final update = Completer<int>();
       final m = ReactiveDataManager<String, int>(
@@ -182,25 +185,128 @@ void main() {
       final fetch = m.getData('k');
       final u = m.updateData('k', 7);
       expect(m.getCurrentValue('k'), 7);
+      expect(await m.getData('k'), 7); // fresh optimistic value, no join
       gate.at(0).complete(1);
-      await fetch;
-      expect(m.getCurrentValue('k'), 1);
+      expect(await fetch, 1);
+      expect(m.getCurrentValue('k'), 7);
       update.complete(0);
+      expect(await u, 0);
+      expect(m.getCurrentValue('k'), 7);
+      expect(gate.calls, hasLength(1));
+    });
+
+    test('a fetch started during an update wins, and is not rolled back',
+        () async {
+      final gate = Gate();
+      final update = Completer<int>();
+      final m = ReactiveDataManager<String, int>(
+        fetcher: gate.call,
+        updater: (_, __) => update.future,
+      );
+      m.set('k', 0);
+      final u = expectLater(
+        m.updateData('k', 7),
+        throwsA(isA<OptimisticUpdateException>()),
+      );
+      final fetch = m.getData('k', forceRefresh: true);
+      gate.at(0).complete(5);
+      expect(await fetch, 5);
+      expect(m.getCurrentValue('k'), 5);
+      update.completeError(StateError('x'));
       await u;
+      expect(m.getCurrentValue('k'), 5); // no rollback to 0
+    });
+
+    test('a failed update does not roll back over a newer set', () async {
+      final update = Completer<int>();
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => 0,
+        updater: (_, __) => update.future,
+      );
+      expect(await m.getData('k'), 0);
+      final u = expectLater(
+        m.updateData('k', 1),
+        throwsA(isA<OptimisticUpdateException>()),
+      );
+      m.set('k', 2);
+      update.completeError(StateError('x'));
+      await u;
+      expect(m.getCurrentValue('k'), 2);
+      expect(m.isFresh('k'), isTrue);
+    });
+
+    test('a failed update does not roll back over a newer patch', () async {
+      final update = Completer<int>();
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => 0,
+        updater: (_, __) => update.future,
+      );
+      await m.getData('k');
+      final u = m.updateData('k', 1);
+      m.patch('k', (v) => v + 10);
+      update.completeError(StateError('x'));
+      await u.then((_) {}, onError: (_) {});
+      expect(m.getCurrentValue('k'), 11);
+    });
+
+    test(
+        'a failed update without a previous value and no newer write '
+        'removes the value', () async {
+      final update = Completer<int>();
+      final storage = InMemoryReactiveStorage<String, int>();
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => 0,
+        updater: (_, __) => update.future,
+        storage: storage,
+      );
+      final u = m.updateData('k', 1);
+      expect(m.getCurrentValue('k'), 1);
+      update.completeError(StateError('x'));
+      await u.then((_) {}, onError: (_) {});
+      expect(m.getCurrentValue('k'), isNull);
+      await pump();
+      expect(storage.entries, isEmpty);
     });
 
     test('rollback arriving after evict does not resurrect old data', () async {
+      final update = Completer<int>();
+      var n = 0;
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => ++n,
+        updater: (_, __) => update.future,
+      );
+      expect(await m.getData('k'), 1);
+      final u = expectLater(m.updateData('k', 2), throwsA(anything));
+      m.evict('k');
+      update.completeError(StateError('late'));
+      await u;
+      await pump();
+      expect(m.getCurrentValue('k'), isNull);
+      expect(await m.getData('k'), 2); // fetched again, not the old value
+      expect(m.getCurrentValue('k'), 2);
+    });
+
+    test('rollback arriving after clearCache does not resurrect old data',
+        () async {
       final update = Completer<int>();
       final m = ReactiveDataManager<String, int>(
         fetcher: (_) async => 1,
         updater: (_, __) => update.future,
       );
-      await m.getData('k');
-      final u = expectLater(m.updateData('k', 2), throwsA(anything));
-      m.evict('k');
+      expect(await m.getData('k'), 1);
+      final errors = <Object>[];
+      final sub = m.getStream('k').listen((_) {}, onError: errors.add);
+      final u = expectLater(
+        m.updateData('k', 2),
+        throwsA(isA<OptimisticUpdateException>()),
+      );
+      m.clearCache();
       update.completeError(StateError('late'));
-      await u.then((_) {}, onError: (_) {});
+      await u;
       await pump();
+      expect(m.getCurrentValue('k'), isNull);
+      expect(errors, isEmpty); // a superseded update emits nothing
+      await sub.cancel();
     });
 
     test(

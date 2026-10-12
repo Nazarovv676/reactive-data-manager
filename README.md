@@ -136,6 +136,14 @@ Both discard a fetch that is in flight, so an older response never overwrites
 the value you just wrote. `set` marks the entry fresh; `patch` keeps its
 invalidated state.
 
+`updateData` follows the same rule: a fetch that started before the update
+never overwrites the optimistic value (its callers still get its result). If
+the updater fails, the previous value is restored only when nothing wrote the
+key since the update started; a newer `set`/`patch`, a fetch started during
+the update or a newer `updateData` wins. `evict`, `clearCache` and `dispose`
+cancel running updates: they complete with their own result and never roll
+back.
+
 ### Errors
 
 `BehaviorSubject` replays the last error to late subscribers. Pass
