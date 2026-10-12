@@ -329,6 +329,121 @@ void main() {
       expect(st.next.hasMore, isFalse);
     });
   });
+
+  group('m3: configuration edge values', () {
+    ReactivePagedManager<String, Item, int> build({
+      int? maxEntries,
+      int maxRefreshPages = 10,
+      int? maxItems,
+      int maxUnproductivePages = 3,
+    }) =>
+        ReactivePagedManager<String, Item, int>(
+          fetchPage: Scripted().call,
+          idOf: (i) => i.id,
+          maxEntries: maxEntries,
+          maxRefreshPages: maxRefreshPages,
+          maxItems: maxItems,
+          maxUnproductivePages: maxUnproductivePages,
+        );
+
+    test('values below 1 are rejected', () {
+      for (final v in [0, -1]) {
+        expect(() => build(maxEntries: v), throwsArgumentError);
+        expect(() => build(maxRefreshPages: v), throwsArgumentError);
+        expect(() => build(maxItems: v), throwsArgumentError);
+        expect(() => build(maxUnproductivePages: v), throwsArgumentError);
+      }
+      expect(
+        () => build(maxEntries: 0),
+        throwsA(
+            isA<ArgumentError>().having((e) => e.name, 'name', 'maxEntries')),
+      );
+      build(
+        maxEntries: 1,
+        maxRefreshPages: 1,
+        maxItems: 1,
+        maxUnproductivePages: 1,
+      );
+    });
+
+    test('maxEntries: 1 keeps the query a call is working on', () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        maxEntries: 1,
+      );
+      final a = m.refresh('a');
+      s.completeLast(items(['1']));
+      expect(ids(await a.bounded), ['1']);
+      final b = m.refresh('b');
+      expect(m.cachedQueries, ['b']);
+      s.completeLast(items(['2']));
+      expect(ids(await b.bounded), ['2']);
+      final states = <PagedState<Item>>[];
+      var done = false;
+      final sub = m
+          .watch('c', fetch: false)
+          .listen(states.add, onDone: () => done = true);
+      await pump();
+      expect(done, isFalse);
+      expect(m.cachedQueries, ['c']); // b was the least recently used
+      expect(states.single.hasLoaded, isFalse);
+      await sub.cancel();
+      expect(m.cachedQueries, ['c']);
+    });
+
+    test('maxUnproductivePages: 1 stops after the first unproductive page',
+        () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        maxUnproductivePages: 1,
+      );
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final f = m.loadNext('q');
+      s.completeLast(items(['a']), next: 3);
+      final st = await f.bounded;
+      expect(s.requests, hasLength(2));
+      expect(st.next.hasMore, isFalse);
+    });
+
+    test('maxRefreshPages: 1 makes allPages a first-page refresh', () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        refreshMode: RefreshMode.allPages,
+        maxRefreshPages: 1,
+      );
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final n = m.loadNext('q');
+      s.completeLast(items(['b']), next: 3);
+      await n;
+      final r = m.refresh('q');
+      s.completeLast(items(['a']), next: 2);
+      final st = await r.bounded;
+      expect(s.requests, hasLength(3));
+      expect(ids(st), ['a']);
+      expect(st.next.hasMore, isTrue);
+    });
+
+    test('maxItems: 1 keeps at least one page', () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        maxItems: 1,
+      );
+      await seed(m, s, 'q', items(['a', 'b']), next: 2);
+      final n = m.loadNext('q');
+      s.completeLast(items(['c', 'd']), previous: 1, next: 3);
+      final st = await n.bounded;
+      expect(ids(st), ['c', 'd']);
+      expect(st.previous.hasMore, isTrue);
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {

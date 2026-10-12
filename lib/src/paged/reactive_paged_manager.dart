@@ -170,7 +170,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// - [idOf]: identity for dedupe, `patchItem` and `removeItem`. Return `null`
   ///   for items without identity.
   /// - [maxAge]: age of the head after which a watch refetches.
-  /// - [maxEntries]: how many *unwatched* queries are kept (LRU).
+  /// - [maxEntries]: how many *unwatched* queries are kept (LRU). At least 1
+  ///   (`null`: unlimited); a query a call is working on is unwatched too.
+  ///
+  /// [maxEntries], [maxRefreshPages], [maxItems] and [maxUnproductivePages]
+  /// must be at least 1, otherwise an [ArgumentError] is thrown.
   /// - [evictAfterUnwatched]: evicts a query that had no listener for this long.
   /// - [retainWhenUnwatched]: [Retention.firstPage] trims a query to its first
   ///   page when the last listener leaves.
@@ -208,7 +212,18 @@ class ReactivePagedManager<Q, T, C extends Object> {
     this.storageVersion = 0,
     this.onError,
     this.clock = DateTime.now,
-  });
+  }) {
+    _checkAtLeastOne(maxEntries, 'maxEntries');
+    _checkAtLeastOne(maxRefreshPages, 'maxRefreshPages');
+    _checkAtLeastOne(maxItems, 'maxItems');
+    _checkAtLeastOne(maxUnproductivePages, 'maxUnproductivePages');
+  }
+
+  static void _checkAtLeastOne(int? value, String name) {
+    if (value != null && value < 1) {
+      throw ArgumentError.value(value, name, 'must be at least 1');
+    }
+  }
 
   /// Loads one page.
   final PageFetcher<Q, T, C> fetchPage;

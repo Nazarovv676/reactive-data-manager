@@ -358,6 +358,10 @@ Rules worth knowing:
   `retainWhenUnwatched: Retention.firstPage` trims to the first page.
   Watched queries are never evicted; `evict`/`clearCache` reset them in place
   and keep their streams open.
+- `maxEntries`, `maxItems`, `maxRefreshPages` and `maxUnproductivePages` must
+  be at least 1 (`null` for no limit where allowed); smaller values throw an
+  `ArgumentError`. To keep no unwatched query at all, use a short
+  `evictAfterUnwatched` instead of `maxEntries: 0`.
 
 ### Refresh modes
 
