@@ -32,7 +32,7 @@ kept (the `fetcher` field remains as a deprecated getter).
 
 ### Added — `ReactiveDataManager` / `ReactiveValue`
 - `maxAge` (constructor and per call), injectable `clock`, `fetchedAt(key)`, `isFresh(key)`.
-- `invalidate(key)` / `invalidateWhere(test)` / `invalidateAll()` — stale-while-revalidate: the value stays visible, in-flight results are discarded, watched keys refetch immediately. With storage they also apply to values restored later.
+- `invalidate(key)` / `invalidateWhere(test)` / `invalidateAll()` — stale-while-revalidate: the value stays visible, in-flight results are discarded, watched keys refetch immediately. With storage they also apply to values restored later; only the 64 most recent `invalidateWhere` predicates are retained, older ones are folded into a single marker that makes persisted values stored before it restore stale (at most one extra fetch, never a missed invalidation; keys already in memory are unaffected).
 - `refresh(key)` — fire-and-forget refetch, errors only via the stream.
 - `prefetch(key)` — fire-and-forget, non-forced `getData`: a no-op when fresh, joins a fetch in flight, errors only via the stream.
 - `watchState(key, {fetch})` and the immutable `DataState<T>` (`data`, `hasData`, `isLoading`, `error`/`stackTrace`, `fetchedAt`, `isStale`, `hasError`, `isLoadingInitial`, `errorAs<E>()`; value equality): the previous data is kept while loading and after a failure, errors are state and never stream errors (nothing is replayed), equal states are not re-emitted, one operation emits one state. The stream survives `evict`, closes on `dispose`, can be listened to several times and is the same object for the same arguments (B6).

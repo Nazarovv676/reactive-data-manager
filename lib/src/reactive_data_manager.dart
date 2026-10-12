@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:meta/meta.dart';
 import 'package:reactive_data_manager/src/data_state.dart';
 import 'package:reactive_data_manager/src/engine/abort.dart';
 import 'package:reactive_data_manager/src/engine/entry_registry.dart';
@@ -195,8 +196,16 @@ class ReactiveDataManager<K, T> {
   DateTime? _invalidatedAllAt;
 
   /// [invalidateWhere] calls since the last [invalidateAll]/[clearCache],
-  /// applied to keys hydrated later (only kept when [storage] is set).
+  /// applied to keys hydrated later (only kept when [storage] is set). At most
+  /// [_maxInvalidations] are retained; older ones are folded into
+  /// [_invalidatedAllAt].
   final List<(DateTime, bool Function(K))> _invalidations = [];
+
+  static const _maxInvalidations = 64;
+
+  /// How many [invalidateWhere] predicates are retained. For tests.
+  @visibleForTesting
+  int get debugRetainedInvalidations => _invalidations.length;
 
   /// Active fetch operations, one lane per key.
   final InFlight<K, Operation<T>> _activeFetches = InFlight();
@@ -653,7 +662,11 @@ class ReactiveDataManager<K, T> {
   /// [invalidate] for every key matching [test] that is cached, being fetched
   /// or watched. With [storage] it also applies to persisted values restored
   /// later (stored before this call). The predicate is kept until the next
-  /// [invalidateAll] or [clearCache].
+  /// [invalidateAll] or [clearCache], but at most 64 predicates are retained:
+  /// older ones are folded into one marker that makes every persisted value
+  /// stored before it restore as stale, whether or not it matched. That costs
+  /// one extra fetch for such old values and never serves one that should have
+  /// been invalidated. Keys already in memory are not affected by the fold.
   void invalidateWhere(bool Function(K key) test) {
     final keys = {
       ..._cache.keys,
@@ -667,10 +680,29 @@ class ReactiveDataManager<K, T> {
     for (final key in matched) {
       _markStale(key);
     }
-    if (storage != null) _invalidations.add((clock(), test));
+    if (storage != null) {
+      _invalidations.add((clock(), test));
+      _foldInvalidations();
+    }
     for (final key in matched) {
       _refetchIfWatched(key);
     }
+  }
+
+  /// Keeps the retained predicates bounded: the oldest ones are replaced by a
+  /// marker at the latest moment among them, so a persisted value stored at or
+  /// before it restores stale (over-invalidating, never under-invalidating).
+  void _foldInvalidations() {
+    if (_invalidations.length <= _maxInvalidations) return;
+    final folded = _invalidations.length - (_maxInvalidations - 1);
+    var at = _invalidations.first.$1;
+    // Clocks need not be monotonic: take the latest of the folded markers.
+    for (final (marker, _) in _invalidations.take(folded)) {
+      if (marker.isAfter(at)) at = marker;
+    }
+    final all = _invalidatedAllAt;
+    if (all == null || at.isAfter(all)) _invalidatedAllAt = at;
+    _invalidations.removeRange(0, folded);
   }
 
   /// Whether [key]'s stream has a listener.

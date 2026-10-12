@@ -299,8 +299,11 @@ never fetch). Values are written after every successful fetch, `set`, `patch`
 and `updateData` (including rollback); `evict` and `clearCache` delete the
 persisted entries, and a read issued after them never sees the deleted
 entry. `invalidate`, `invalidateWhere` and `invalidateAll` also mark values
-that are restored later (if they were stored before the call). Storage errors
-(also synchronous throws) never fail `getData`. Bump `storageVersion` after a
+that are restored later (if they were stored before the call). Only the 64 most
+recent `invalidateWhere` predicates are remembered; older ones are folded into
+one marker, so a persisted value stored before it is restored stale even if no
+folded predicate matched it (one extra fetch, never a missed invalidation).
+Storage errors (also synchronous throws) never fail `getData`. Bump `storageVersion` after a
 model change to ignore old entries.
 
 Storage operations run in call order: a read waits for the writes, deletes and
