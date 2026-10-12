@@ -12,8 +12,10 @@ import 'package:reactive_data_manager/src/engine/abort.dart';
 class Operation<R> {
   /// Creates a pending operation.
   Operation() {
-    // Callers that never await (fire-and-forget) must not trigger an
-    // unhandled zone error; callers that do await still receive the error.
+    // Joined callers that never await this future (e.g. `refresh`, `prefetch`,
+    // `watch`, which also call `.ignore()` on their own futures) must not
+    // trigger an unhandled zone error. A plain `getData` returns its own
+    // `async` future, which still reports the error to an unawaited caller.
     _completer.future.ignore();
   }
 
