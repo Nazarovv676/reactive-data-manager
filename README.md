@@ -239,15 +239,15 @@ ReactiveDataManager<int, User>(
 
 ```dart
 ReactiveDataManager<int, User>.cancellable(
-    fetcher: (id, cancel) {
+    fetcher: (id, signal) {
         final token = CancelToken();
-        cancel.then((_) => token.cancel()); // superseded/evicted/cleared/disposed
+        signal.whenAborted.then((_) => token.cancel()); // superseded/evicted/cleared/disposed
         return api.getUser(id, cancelToken: token);
     },
 );
 ```
 
-The signal fires when the fetch is superseded (`forceRefresh`/`refresh`; its
+The signal is aborted when the fetch is superseded (`forceRefresh`/`refresh`; its
 callers then complete with the newer result), or when its key is evicted,
 cleared or the manager disposed. In the latter cases callers still waiting
 on `getData` complete with the fetcher's own outcome, i.e. **the fetcher's
@@ -256,9 +256,10 @@ cancellation error** (e.g. `DioException.cancel`) if it honours the signal.
 it: the request finishes, waiting callers get its result, and the result is
 not cached.
 
-The base fetcher gets a bare `Future<void> cancel`, while the paged fetcher
-gets an `AbortSignal` (`req.signal.whenAborted`, `req.signal.aborted`) inside
-its `PageRequest`; both complete/abort under the same rules.
+Both managers hand the fetcher the same `AbortSignal` (`signal.whenAborted`,
+`signal.aborted`): the base fetcher receives it as an argument, the paged
+fetcher inside its `PageRequest` (`req.signal`). It is aborted under the same
+rules.
 
 ### Cross-key operations
 

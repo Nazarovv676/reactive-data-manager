@@ -6,11 +6,11 @@ import 'package:reactive_data_manager/reactive_data_manager.dart';
 /// A fetcher whose calls are completed by hand.
 class Gate {
   final calls = <Completer<int>>[];
-  final signals = <Future<void>>[];
-  Future<int> call(String key, [Future<void>? cancel]) {
+  final signals = <AbortSignal>[];
+  Future<int> call(String key, [AbortSignal? signal]) {
     final c = Completer<int>();
     calls.add(c);
-    if (cancel != null) signals.add(cancel);
+    if (signal != null) signals.add(signal);
     return c.future;
   }
 }
@@ -282,13 +282,16 @@ void main() {
       );
       Future<bool> fired(int i) async {
         var done = false;
-        gate.signals[i].then((_) => done = true);
+        gate.signals[i].whenAborted.then((_) => done = true);
         await pump();
         return done;
       }
 
       m.getData('a').ignore(); // #0
       m.getData('a', forceRefresh: true).ignore(); // #1 supersedes #0
+      // The signal is a synchronous flag as well as a future.
+      expect(gate.signals[0].aborted, isTrue);
+      expect(gate.signals[1].aborted, isFalse);
       expect(await fired(0), isTrue);
       expect(await fired(1), isFalse);
       m.getData('b').ignore(); // #2
@@ -313,10 +316,10 @@ void main() {
         calls = [];
         // Like Dio: the request fails with a cancellation error on cancel.
         m = ReactiveDataManager<String, int>.cancellable(
-          fetcher: (key, cancel) {
+          fetcher: (key, signal) {
             final c = Completer<int>();
             calls.add(c);
-            cancel.then((_) {
+            signal.whenAborted.then((_) {
               if (!c.isCompleted) c.completeError(const _Cancelled());
             });
             return c.future;
@@ -388,17 +391,17 @@ void main() {
       expect(n, 1);
       expect(m.getCurrentValue('abc'), isNull); // bypasses the cache
 
-      Future<void>? signal;
+      AbortSignal? signal;
       final c = ReactiveDataManager<String, int>.cancellable(
-        fetcher: (k, cancel) async {
-          signal = cancel;
+        fetcher: (k, abort) async {
+          signal = abort;
           return 7;
         },
       );
       // ignore: deprecated_member_use_from_same_package
       expect(await c.fetcher('k'), 7);
       var fired = false;
-      signal!.then((_) => fired = true);
+      signal!.whenAborted.then((_) => fired = true);
       c.clearCache();
       await pump();
       expect(fired, isFalse); // never cancelled
@@ -454,20 +457,20 @@ void main() {
     });
 
     test('cancellable gets the signal', () async {
-      final signals = <Future<void>>[];
-      final v = ReactiveValue<int>.cancellable(fetcher: (cancel) {
-        signals.add(cancel);
+      final signals = <AbortSignal>[];
+      final v = ReactiveValue<int>.cancellable(fetcher: (signal) {
+        signals.add(signal);
         return Completer<int>().future;
       });
       v.getData().ignore();
       var fired = false;
-      signals.single.then((_) => fired = true);
+      signals.single.whenAborted.then((_) => fired = true);
       // M5 (deliberate change): invalidate no longer aborts the request.
       v.invalidate();
       await pump();
       expect(fired, isFalse);
       v.getData().ignore();
-      signals.last.then((_) => fired = true);
+      signals.last.whenAborted.then((_) => fired = true);
       v.clear();
       await pump();
       expect(fired, isTrue);

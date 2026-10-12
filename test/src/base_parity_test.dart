@@ -8,23 +8,19 @@ import 'package:reactive_data_manager/reactive_data_manager.dart';
 class Gate {
   final calls = <Completer<int>>[];
   final keys = <String>[];
-  final signals = <Future<void>>[];
-  Future<int> call(String key, [Future<void>? cancel]) {
+  final signals = <AbortSignal>[];
+  Future<int> call(String key, [AbortSignal? signal]) {
     final c = Completer<int>();
     calls.add(c);
     keys.add(key);
-    if (cancel != null) signals.add(cancel);
+    if (signal != null) signals.add(signal);
     return c.future;
   }
 }
 
 Future<void> pump() => Future<void>.delayed(Duration.zero);
 
-bool fired(Future<void> signal) {
-  var done = false;
-  signal.then((_) => done = true);
-  return done;
-}
+bool fired(AbortSignal signal) => signal.aborted;
 
 void main() {
   group('invalidate refetches a watched key', () {

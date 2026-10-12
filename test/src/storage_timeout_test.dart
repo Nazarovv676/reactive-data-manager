@@ -226,7 +226,7 @@ void main() {
       fakeAsync((async) {
         final storage = SlowStorage<String, int>();
         final v = ReactiveValue<int>.cancellable(
-          fetcher: (cancel) async => 6,
+          fetcher: (signal) async => 6,
           storage: storage,
           storageReadTimeout: _timeout,
         );

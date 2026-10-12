@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:reactive_data_manager/src/data_state.dart';
+import 'package:reactive_data_manager/src/engine/abort.dart';
 import 'package:reactive_data_manager/src/reactive_data_manager.dart';
 import 'package:reactive_data_manager/src/storage.dart';
 
@@ -42,10 +43,10 @@ class ReactiveValue<T> {
           storageReadTimeout: storageReadTimeout,
         );
 
-  /// Like the default constructor, but the fetcher receives a cancellation
-  /// signal. See [ReactiveDataManager.cancellable].
+  /// Like the default constructor, but the fetcher receives an [AbortSignal].
+  /// See [ReactiveDataManager.cancellable].
   ReactiveValue.cancellable({
-    required Future<T> Function(Future<void> cancel) fetcher,
+    required Future<T> Function(AbortSignal signal) fetcher,
     Future<dynamic> Function(T data)? updater,
     T? Function(T data)? fetchFilter,
     dynamic Function(dynamic result)? updateFilter,
@@ -59,7 +60,7 @@ class ReactiveValue<T> {
     String storageKey = 'value',
   })  : _key = storageKey,
         _manager = ReactiveDataManager<String, T>.cancellable(
-          fetcher: (_, cancel) => fetcher(cancel),
+          fetcher: (_, signal) => fetcher(signal),
           updater: updater == null ? null : (_, data) => updater(data),
           fetchFilter:
               fetchFilter == null ? null : (_, data) => fetchFilter(data),

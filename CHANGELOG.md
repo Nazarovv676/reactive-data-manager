@@ -43,7 +43,7 @@ kept (the `fetcher` field remains as a deprecated getter).
 - `set(key, value)` / `patch(key, transform)` / `patchWhere(transform)` — plain cache writes, no updater or rollback. An in-flight fetch is discarded so it cannot overwrite them.
 - `replayErrors: false` — do not replay the last error to late subscribers.
 - `errorMapper` — surfaces typed errors on the stream and from `getData`.
-- `ReactiveDataManager.cancellable` — fetcher receiving a cancel signal (`Future<void>`) that completes when the fetch is superseded, evicted, cleared or disposed, e.g. for Dio's `CancelToken`.
+- `ReactiveDataManager.cancellable` — the fetcher receives an `AbortSignal` (the same type as `PageRequest.signal`) that is aborted when the fetch is superseded, evicted, cleared or disposed; wire `signal.whenAborted` to e.g. Dio's `CancelToken`.
 - `ReactiveValue<T>` — keyless single-value manager with the same API (including `prefetch()` and `watchState()`); `storageKey` (default `'value'`) lets several values share one storage adapter, and `clear()` deletes only that key.
 - Persistence: `ReactiveStorage`, `StoredEntry`, `InMemoryReactiveStorage`, `storage` / `storageVersion` options (stale-while-revalidate across restarts). `getData`, `watch` (also `fetch: false`) and `getStream` restore a persisted value; storage errors (also synchronous throws) never fail a read; storage is never touched after `dispose()`.
 

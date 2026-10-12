@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:reactive_data_manager/src/data_state.dart';
+import 'package:reactive_data_manager/src/engine/abort.dart';
 import 'package:reactive_data_manager/src/engine/entry_registry.dart';
 import 'package:reactive_data_manager/src/engine/errors.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
@@ -90,10 +91,11 @@ class ReactiveDataManager<K, T> {
     _checkMaxEntries(maxEntries);
   }
 
-  /// Like the default constructor, but the fetcher receives a cancellation
-  /// signal: a future that completes when the fetch is superseded (by
-  /// `forceRefresh`/[refresh]), or its key is [evict]ed, [clearCache]d or the
-  /// manager is [dispose]d. Wire it to e.g. Dio's `CancelToken`.
+  /// Like the default constructor, but the fetcher receives an [AbortSignal]
+  /// (the same type `ReactivePagedManager` hands its page fetcher) that is
+  /// aborted when the fetch is superseded (by `forceRefresh`/[refresh]), or
+  /// its key is [evict]ed, [clearCache]d or the manager is [dispose]d. Wire
+  /// `signal.whenAborted` to e.g. Dio's `CancelToken`.
   ///
   /// - Superseded: waiting callers complete with the newer fetch's result.
   /// - Evicted/cleared/disposed: waiting callers complete with the fetcher's
@@ -103,7 +105,7 @@ class ReactiveDataManager<K, T> {
   ///   *not* fire the signal: the request finishes, waiting callers receive
   ///   its result, and the result is not cached.
   ReactiveDataManager.cancellable({
-    required Future<T> Function(K key, Future<void> cancel) fetcher,
+    required Future<T> Function(K key, AbortSignal signal) fetcher,
     this.updater,
     this.fetchFilter,
     this.updateFilter,
@@ -126,7 +128,7 @@ class ReactiveDataManager<K, T> {
     }
   }
 
-  final Future<T> Function(K key, Future<void> cancel) _fetcher;
+  final Future<T> Function(K key, AbortSignal signal) _fetcher;
 
   /// The fetcher, called directly: bypasses the cache, in-flight joining and
   /// the stream. For a [ReactiveDataManager.cancellable] fetcher the cancel
@@ -136,7 +138,7 @@ class ReactiveDataManager<K, T> {
     'Will be removed in 3.0.0.',
   )
   Future<T> Function(K key) get fetcher =>
-      (key) => _fetcher(key, Completer<void>().future);
+      (key) => _fetcher(key, AbortController().signal);
 
   /// A function that updates data for a specific key.
   final Future<dynamic> Function(K key, T data)? updater;
@@ -476,7 +478,7 @@ class ReactiveDataManager<K, T> {
     try {
       T result;
       try {
-        result = await _fetcher(key, fetch.signal.whenAborted);
+        result = await _fetcher(key, fetch.signal);
       } catch (e, s) {
         final error = mapError(errorMapper, e, s);
         if (!fetch.discarded) _emitError(key, error, s);
