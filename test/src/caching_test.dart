@@ -602,6 +602,131 @@ void main() {
       await pump();
       expect(storage.entries['k']!.version, 2);
     });
+
+    group('m6', () {
+      test('watch(fetch: false) restores the persisted value, no network',
+          () async {
+        storage.entries['k'] = StoredEntry(7, DateTime(2025));
+        final m = make();
+        expect(await m.watch('k', fetch: false).first, 7); // stale, kept
+        expect(calls, 0);
+        expect(m.fetchedAt('k'), DateTime(2025));
+      });
+
+      test('getStream restores the persisted value', () async {
+        storage.entries['k'] = StoredEntry(7, DateTime(2026));
+        final m = make();
+        expect(await m.getStream('k').firstWhere((v) => v != null), 7);
+        expect(m.getCurrentValue('k'), 7);
+        expect(calls, 0);
+      });
+
+      test('getStream does not read storage for a cached key', () async {
+        final reads = <String>[];
+        final m = ReactiveDataManager<String, int>(
+          fetcher: (_) async => 1,
+          storage: _CountingStorage(storage, reads),
+        );
+        await m.getData('k');
+        expect(reads, ['k']);
+        m.getStream('k');
+        m.watch('k', fetch: false).listen((_) {}).cancel();
+        await pump();
+        expect(reads, ['k']);
+      });
+
+      test('invalidateWhere applies to keys restored later', () async {
+        storage.entries['a'] = StoredEntry(1, DateTime(2026));
+        storage.entries['b'] = StoredEntry(2, DateTime(2026));
+        now = DateTime(2026).add(const Duration(seconds: 1));
+        final m = make();
+        m.invalidateWhere((k) => k == 'a');
+        expect(m.isFresh('a'), isFalse);
+        final seen = <int>[];
+        final sub = m.watch('a').listen(seen.add);
+        await pump();
+        await pump();
+        expect(seen, [1, 101]); // restored value, then revalidated
+        expect(await m.getData('b'), 2); // not matching: served from storage
+        expect(calls, 1);
+        await sub.cancel();
+      });
+
+      test('invalidateWhere does not affect values persisted after it',
+          () async {
+        final m = make();
+        m.invalidateWhere((_) => true);
+        now = now.add(const Duration(seconds: 1));
+        storage.entries['k'] = StoredEntry(5, now);
+        expect(await m.getData('k'), 5);
+        expect(calls, 0);
+      });
+
+      test('a throwing invalidateWhere predicate marks a restored value stale',
+          () async {
+        storage.entries['k'] = StoredEntry(5, DateTime(2026));
+        final m = make();
+        var armed = false;
+        m.invalidateWhere((_) => armed ? throw StateError('x') : false);
+        armed = true;
+        expect(await m.getData('k'), 101);
+      });
+
+      test('invalidateAll and clearCache drop the invalidateWhere markers',
+          () async {
+        storage.entries['k'] = StoredEntry(5, DateTime(2026));
+        now = DateTime(2026).add(const Duration(seconds: 1));
+        final m = make();
+        var asked = 0;
+        m.invalidateWhere((_) {
+          asked++;
+          return false;
+        });
+        m.invalidateAll();
+        expect(await m.getData('k'), 101); // stale through invalidateAll
+        expect(asked, 0); // the older marker is superseded
+        final m2 = make();
+        m2.invalidateWhere((_) {
+          asked++;
+          return true;
+        });
+        m2.clearCache();
+        await pump(); // the queued clear has run
+        storage.entries['k'] = StoredEntry(5, DateTime(2026));
+        expect(await m2.getData('k'), 5);
+        expect(asked, 0);
+      });
+
+      test('invalidate of an uncached key matters only with storage', () async {
+        storage.entries['k'] = StoredEntry(5, DateTime(2026));
+        final m = make();
+        m.invalidate('k');
+        expect(await m.getData('k'), 101); // restored value counted stale
+        final plain = ReactiveDataManager<String, int>(fetcher: (_) async => 1);
+        plain.invalidate('x');
+        expect(await plain.getData('x'), 1);
+        expect(plain.isFresh('x'), isTrue);
+      });
+
+      test('storage that held nothing is not read again until evicted',
+          () async {
+        final reads = <String>[];
+        var fail = true;
+        final m = ReactiveDataManager<String, int>(
+          fetcher: (_) async => fail ? throw StateError('x') : 1,
+          storage: _CountingStorage(storage, reads),
+        );
+        await expectLater(m.getData('k'), throwsStateError);
+        await expectLater(m.getData('k'), throwsStateError);
+        expect(reads, ['k']);
+        m.invalidate('k'); // nothing persisted: no marker needed
+        fail = false;
+        expect(await m.getData('k'), 1);
+        m.evict('k');
+        await m.getData('k');
+        expect(reads, ['k', 'k']);
+      });
+    });
   });
 }
 

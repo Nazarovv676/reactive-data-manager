@@ -205,12 +205,21 @@ me.watch().listen(print);
 ### Persistence
 
 Pass a `ReactiveStorage` to keep values across restarts. On the first
-`getData`/`watch` of a key with nothing in memory the stored value is emitted
-immediately with its original `fetchedAt`: fresh means no network, stale means
-emit then refetch. Values are written after every successful fetch, `set`,
-`patch` and `updateData` (including rollback); `evict` and `clearCache` delete
-the persisted entries. Storage errors never fail `getData`. Bump
-`storageVersion` after a model change to ignore old entries.
+`getData`/`watch`/`getStream` of a key with nothing in memory the stored value
+is emitted with its original `fetchedAt`: fresh means no network, stale means
+emit then refetch (`watch(fetch: false)` and `getStream` only restore, they
+never fetch). Values are written after every successful fetch, `set`, `patch`
+and `updateData` (including rollback); `evict` and `clearCache` delete the
+persisted entries, and a read issued after them never sees the deleted
+entry. `invalidate`, `invalidateWhere` and `invalidateAll` also mark values
+that are restored later (if they were stored before the call). Storage errors
+(also synchronous throws) never fail `getData`. Bump `storageVersion` after a
+model change to ignore old entries.
+
+Storage operations run in call order: a read waits for the writes, deletes and
+clears queued before it. `getData` waits for the read of a key it restores, so
+an adapter whose `read` (or an earlier `write`) never completes delays
+`getData` for that key; keep adapters bounded (e.g. with their own timeout).
 
 ```dart
 final manager = ReactiveDataManager<int, User>(

@@ -141,6 +141,10 @@ class ReactiveDataManager<K, T> {
   final Set<K> _stale = {};
   DateTime? _invalidatedAllAt;
 
+  /// [invalidateWhere] calls since the last [invalidateAll]/[clearCache],
+  /// applied to keys hydrated later (only kept when [storage] is set).
+  final List<(DateTime, bool Function(K))> _invalidations = [];
+
   /// Active fetch operations, one lane per key.
   final InFlight<K, Operation<T>> _activeFetches = InFlight();
 
@@ -152,14 +156,18 @@ class ReactiveDataManager<K, T> {
   int _writes = 0;
 
   final Map<K, _Hydration> _hydrations = {};
+
+  /// Uncached keys whose storage was read and held nothing: not read again.
   final Set<K> _hydrated = {};
   late final StorageQueue<K, T> _storage =
       StorageQueue(storage, storageVersion);
   late final Freshness _freshness = Freshness(clock, maxAge);
 
-  /// Get a stream for a specific key
+  /// Get a stream for a specific key. With [storage], a persisted value is
+  /// restored into the stream when nothing is in memory (no fetch).
   Stream<T?> getStream(K key) {
     final subject = _getSubjectForKey(key);
+    _hydrate(key)?.ignore();
     if (replayErrors) return subject.stream;
     final errors = _errorChannels.putIfAbsent(
       key,
@@ -402,15 +410,23 @@ class ReactiveDataManager<K, T> {
   /// Marks [key] stale but keeps its value visible. A fetch that is in flight
   /// is discarded; the next [getData] fetches again.
   void invalidate(K key) {
-    _stale.add(key);
+    // An uncached key only needs marking if a persisted value may come back.
+    if (_cache.containsKey(key) ||
+        (storage != null && !_hydrated.contains(key))) {
+      _stale.add(key);
+    }
     _activeFetches.take(key)?.detach();
   }
 
-  /// [invalidate] for every cached key matching [test].
+  /// [invalidate] for every cached key matching [test]. With [storage] it also
+  /// applies to persisted values restored later (stored before this call).
+  /// The predicate is kept until the next [invalidateAll] or [clearCache].
   void invalidateWhere(bool Function(K key) test) {
     for (final key in _cache.keys.toList()) {
       if (test(key)) invalidate(key);
     }
+    if (storage == null) return;
+    _invalidations.add((clock(), test));
   }
 
   /// Replaces cached values across keys. For every cached key, [transform]
@@ -430,6 +446,7 @@ class ReactiveDataManager<K, T> {
   /// [invalidate] for every key.
   void invalidateAll() {
     _invalidatedAllAt = clock();
+    _invalidations.clear(); // covered by the newer, wider marker
     _stale.addAll(_cache.keys);
     for (final fetch in _activeFetches.takeAll()) {
       fetch.detach();
@@ -452,6 +469,7 @@ class ReactiveDataManager<K, T> {
 
   void _write(K key, T value, {DateTime? at, bool markFresh = true}) {
     _cache[key] = value;
+    _hydrated.remove(key); // cached now: never read from storage
     _writeSeq[key] = ++_writes;
     final fetchedAt = at ?? clock();
     _fetchedAt[key] = fetchedAt;
@@ -496,16 +514,33 @@ class ReactiveDataManager<K, T> {
     // Evicted or cleared while reading: drop the result.
     if (!identical(_hydrations[key], hydration)) return;
     _hydrations.remove(key);
-    _hydrated.add(key);
-    if (entry == null || !_storage.accept(key, entry)) return;
-    if (_cache.containsKey(key)) return;
+    if (_cache.containsKey(key)) return; // written meanwhile: memory wins
+    if (entry == null || !_storage.accept(key, entry)) {
+      _hydrated.add(key); // nothing persisted: do not read again
+      _stale.remove(key);
+      return;
+    }
     _cache[key] = entry.value;
     _fetchedAt[key] = entry.fetchedAt;
-    final invalidatedAt = _invalidatedAllAt;
-    if (invalidatedAt != null && !entry.fetchedAt.isAfter(invalidatedAt)) {
-      _stale.add(key);
-    }
+    if (_invalidatedSince(key, entry.fetchedAt)) _stale.add(key);
     _getSubjectForKey(key).add(entry.value);
+  }
+
+  /// Whether a value of [key] fetched [at] was invalidated by [invalidateAll]
+  /// or [invalidateWhere] before it was restored. A throwing predicate counts
+  /// as a match.
+  bool _invalidatedSince(K key, DateTime at) {
+    final all = _invalidatedAllAt;
+    if (all != null && !at.isAfter(all)) return true;
+    for (final (marker, test) in _invalidations) {
+      if (at.isAfter(marker)) continue;
+      try {
+        if (test(key)) return true;
+      } catch (_) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // --- lifecycle -----------------------------------------------------------
@@ -523,6 +558,7 @@ class ReactiveDataManager<K, T> {
     _fetchedAt.clear();
     _stale.clear();
     _invalidatedAllAt = null;
+    _invalidations.clear();
     _hydrations.clear();
     _hydrated.clear();
     _storage.clear();
