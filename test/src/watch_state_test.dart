@@ -37,7 +37,7 @@ class Recorder {
   late final StreamSubscription<DataState<int>> sub;
 
   DataState<int> get last => states.last;
-  Future<void> cancel() => sub.cancel();
+  Future<void> close() => sub.cancel();
 }
 
 ReactiveDataManager<String, int> make(
@@ -128,7 +128,7 @@ void main() {
       await pump();
       expect(r.states, [loading, data(1)]);
       expect(r.streamErrors, isEmpty);
-      await r.cancel();
+      await r.close();
     });
 
     test('fetch: false only observes', () async {
@@ -141,7 +141,7 @@ void main() {
       m.set('k', 3);
       await pump();
       expect(r.states, [const DataState<int>(), data(3)]);
-      await r.cancel();
+      await r.close();
     });
 
     test('a fresh value: one state, no fetch', () async {
@@ -152,7 +152,7 @@ void main() {
       await pump();
       expect(r.states, [data(2)]);
       expect(gate.calls, isEmpty);
-      await r.cancel();
+      await r.close();
     });
 
     test('a stale value is kept while it is refetched', () async {
@@ -168,7 +168,7 @@ void main() {
       gate.calls.single.complete(2);
       await pump();
       expect(r.last, DataState<int>(data: 2, hasData: true, fetchedAt: now));
-      await r.cancel();
+      await r.close();
     });
 
     test('errors are state, never stream errors; data is kept', () async {
@@ -200,7 +200,7 @@ void main() {
       expect(r.last.hasData, isTrue);
       expect(r.last.error, 'again');
       expect(r.streamErrors, isEmpty);
-      await r.cancel();
+      await r.close();
     });
 
     test('late listeners get the error in the state, no replay', () async {
@@ -217,7 +217,7 @@ void main() {
         expect(state.stackTrace, isNotNull);
         expect(state.hasData || state.isLoading, isFalse);
         expect(r.streamErrors, isEmpty);
-        await r.cancel();
+        await r.close();
       }
     });
 
@@ -228,7 +228,7 @@ void main() {
       gate.calls[0].completeError(StateError('x'));
       await pump();
       expect(r.last.error, 'mapped');
-      await r.cancel();
+      await r.close();
     });
 
     test('a write clears the error', () async {
@@ -240,7 +240,7 @@ void main() {
       m.set('k', 4);
       await pump();
       expect(r.last, data(4));
-      await r.cancel();
+      await r.close();
     });
 
     test('invalidate: unwatched marks stale; watched refetches', () async {
@@ -256,7 +256,7 @@ void main() {
       gate.calls[0].complete(2);
       await pump();
       expect(r.last, data(2));
-      await r.cancel();
+      await r.close();
 
       // Unwatched now: only marked.
       m.invalidate('k');
@@ -283,7 +283,7 @@ void main() {
       await pump();
       expect(r.states, [loading, data(5)]); // neither result was written
       expect(m.getCurrentValue('k'), 5);
-      await r.cancel();
+      await r.close();
     });
 
     test('race: invalidate of a watched key while its fetch runs', () async {
@@ -297,7 +297,7 @@ void main() {
       gate.calls[0].complete(1); // detached: ignored
       await pump();
       expect(r.states, [loading, data(2)]);
-      await r.cancel();
+      await r.close();
     });
 
     test('race: a superseded fetch failing late changes nothing', () async {
@@ -312,7 +312,7 @@ void main() {
       gate.calls[1].complete(3);
       await pump();
       expect(r.states, [loading, data(3)]);
-      await r.cancel();
+      await r.close();
     });
 
     test('set, patch and updateData (with rollback) emit', () async {
@@ -332,7 +332,7 @@ void main() {
       expect(r.states.map((s) => s.data), [null, 1, 2, 10, 2]);
       expect(r.last.errorAs<OptimisticUpdateException>(), isNotNull);
       expect(r.streamErrors, isEmpty);
-      await r.cancel();
+      await r.close();
     });
 
     test('a rollback to "no value" emits the empty state with the error',
@@ -348,7 +348,7 @@ void main() {
       await pump();
       expect(r.last.hasData, isFalse);
       expect(r.last.hasError, isTrue);
-      await r.cancel();
+      await r.close();
     });
 
     test('clearCache resets every watched key; in-flight fetches stop',
@@ -364,8 +364,8 @@ void main() {
       await pump();
       expect(a.last, const DataState<int>());
       expect(b.last, const DataState<int>());
-      await a.cancel();
-      await b.cancel();
+      await a.close();
+      await b.close();
     });
 
     test('evict resets the state and the stream keeps working', () async {
@@ -384,7 +384,7 @@ void main() {
       gate.calls[1].complete(7);
       await pump();
       expect(r.last, data(7));
-      await r.cancel();
+      await r.close();
     });
 
     test('equal states are not re-emitted', () async {
@@ -398,7 +398,7 @@ void main() {
       m.invalidate('other');
       await pump();
       expect(r.states, [data(1)]);
-      await r.cancel();
+      await r.close();
     });
 
     test('several listeners; cancelling one keeps the other', () async {
@@ -407,12 +407,12 @@ void main() {
       final a = Recorder(m.watchState('k', fetch: false));
       final b = Recorder(m.watchState('k', fetch: false));
       await pump();
-      await a.cancel();
+      await a.close();
       m.set('k', 1);
       await pump();
       expect(a.states, [const DataState<int>()]);
       expect(b.last, data(1));
-      await b.cancel();
+      await b.close();
       m.invalidate('k'); // nobody watches: no refetch
       expect(gate.calls, isEmpty);
     });
@@ -427,7 +427,7 @@ void main() {
       m.set('c', 3);
       expect(m.getCurrentValue('a'), 1);
       expect(m.getCurrentValue('b'), isNull);
-      await r.cancel();
+      await r.close();
     });
 
     test('dispose closes the stream; listening afterwards', () async {
@@ -454,7 +454,7 @@ void main() {
       await pump();
       expect(r.states, [loading, data(9)]);
       expect(gate.calls, isEmpty);
-      await r.cancel();
+      await r.close();
     });
 
     test('hydration of a stale value refetches without flicker', () async {
@@ -476,7 +476,7 @@ void main() {
       expect(r.last.data, 1);
       expect(r.last.isLoading, isFalse);
       expect(r.last.isStale, isFalse);
-      await r.cancel();
+      await r.close();
     });
 
     test('hydration with nothing stored ends the reading state', () async {
@@ -486,7 +486,7 @@ void main() {
       final r = Recorder(m.watchState('k', fetch: false));
       await pump();
       expect(r.states, [loading, const DataState<int>()]);
-      await r.cancel();
+      await r.close();
     });
 
     test('hydration + invalidate before the read finished', () async {
@@ -501,7 +501,7 @@ void main() {
       gate.calls.single.complete(10);
       await pump();
       expect(r.last, data(10));
-      await r.cancel();
+      await r.close();
     });
 
     test('hydration races a set: memory wins', () async {
@@ -514,7 +514,7 @@ void main() {
       await pump();
       expect(r.last, data(1));
       expect(r.states.where((s) => s.data == 9), isEmpty);
-      await r.cancel();
+      await r.close();
     });
 
     test('a state is emitted once per operation', () {
@@ -548,15 +548,15 @@ void main() {
       await pump();
       expect(a.states, [loading, data(1)]);
       expect(b.states, [data(1)]);
-      await a.cancel();
-      await b.cancel();
+      await a.close();
+      await b.close();
       // After evict new streams are handed out; the old ones still work.
       m.evict('k');
       expect(m.watchState('k'), isNot(same(stream)));
       final c = Recorder(stream);
       await pump();
       expect(c.states, [loading]);
-      await c.cancel();
+      await c.close();
     });
 
     test('ReactiveValue.watchState', () async {
