@@ -69,7 +69,7 @@ Paginated lists, one accumulated list per query:
 ### Changed (internal)
 - `ReactiveDataManager`, `ReactiveValue` and `ReactivePagedManager` run on a shared internal engine (`lib/src/engine/`): in-flight operations with abort signals and per-lane join/supersede, freshness against the injectable clock, the serialized storage queue with version checks, and the entry registry (watcher ref-count, `maxEntries` LRU, `evictAfterUnwatched` timers).
 - `fake_async` dev dependency relaxed to `^1.3.1` (Flutter 3.27).
-- `meta: ^1.15.0` added as a dependency (for `@visibleForTesting`; the version pinned by Flutter 3.27).
+- `meta: ^1.12.0` added as a dependency (for `@visibleForTesting`; the version pinned by Flutter 3.22, the declared SDK floor).
 - Error mapping lives in `lib/src/engine/errors.dart`, shared by both managers.
 
 ### Not implemented (from the design)
