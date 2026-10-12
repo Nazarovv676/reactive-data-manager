@@ -302,6 +302,34 @@ void main() {
       expect(await fired(1), isTrue); // cleared too
     });
 
+    test('deprecated fetcher getter calls the fetcher directly', () async {
+      var n = 0;
+      final m = ReactiveDataManager<String, int>(fetcher: (k) async {
+        n++;
+        return k.length;
+      });
+      // ignore: deprecated_member_use_from_same_package
+      final Future<int> Function(String) fetcher = m.fetcher;
+      expect(await fetcher('abc'), 3);
+      expect(n, 1);
+      expect(m.getCurrentValue('abc'), isNull); // bypasses the cache
+
+      Future<void>? signal;
+      final c = ReactiveDataManager<String, int>.cancellable(
+        fetcher: (k, cancel) async {
+          signal = cancel;
+          return 7;
+        },
+      );
+      // ignore: deprecated_member_use_from_same_package
+      expect(await c.fetcher('k'), 7);
+      var fired = false;
+      signal!.then((_) => fired = true);
+      c.clearCache();
+      await pump();
+      expect(fired, isFalse); // never cancelled
+    });
+
     test('one-argument fetchers keep working', () async {
       final m = ReactiveDataManager<String, int>(fetcher: (_) async => 1);
       expect(await m.getData('k'), 1);

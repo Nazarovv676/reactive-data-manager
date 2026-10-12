@@ -79,6 +79,16 @@ class ReactiveDataManager<K, T> {
 
   final Future<T> Function(K key, Future<void> cancel) _fetcher;
 
+  /// The fetcher, called directly: bypasses the cache, in-flight joining and
+  /// the stream. For a [ReactiveDataManager.cancellable] fetcher the cancel
+  /// signal never fires.
+  @Deprecated(
+    'Kept for 1.1.0 compatibility; use getData(key, forceRefresh: true). '
+    'Will be removed in 2.0.0.',
+  )
+  Future<T> Function(K key) get fetcher =>
+      (key) => _fetcher(key, Completer<void>().future);
+
   /// A function that updates data for a specific key.
   final Future<dynamic> Function(K key, T data)? updater;
 
