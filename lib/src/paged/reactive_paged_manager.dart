@@ -423,17 +423,19 @@ class ReactivePagedManager<Q, T, C extends Object> {
       }
     } catch (error, stack) {
       if (op.discarded) return;
-      e.lanes.take(_Lane.head);
-      e.refreshError = PagedError(error, stack);
-      _finishOp(e);
-      _emit(e);
-      _report(query, PageDirection.initial, error, stack);
-      op.resolve(_stateOf(e));
+      _failHead(e, query, op, error, stack);
       return;
     }
     if (op.discarded) return;
 
-    _applyHead(e, op, results);
+    // The apply phase runs user callbacks (`idOf`, replayed transforms). A
+    // throw fails this load like a fetch error instead of wedging the lane.
+    try {
+      _applyHead(e, op, results);
+    } catch (error, stack) {
+      _failHead(e, query, op, error, stack);
+      return;
+    }
     e.totalCount = results.last.totalCount ?? results.first.totalCount;
     e.fetchedAt = clock();
     e.stale = false;
@@ -446,6 +448,23 @@ class ReactivePagedManager<Q, T, C extends Object> {
     _finishOp(e);
     _persist(query, e);
     _emit(e);
+    op.resolve(_stateOf(e));
+  }
+
+  /// Ends head load [op] with a failure: the previous items stay, the error
+  /// goes to `refreshError` and [onError], and the callers get the state.
+  void _failHead(
+    _Entry<T, C> e,
+    Q query,
+    _Op<T, C> op,
+    Object error,
+    StackTrace stack,
+  ) {
+    e.lanes.take(_Lane.head);
+    e.refreshError = PagedError(error, stack);
+    _finishOp(e);
+    _emit(e);
+    _report(query, PageDirection.initial, error, stack);
     op.resolve(_stateOf(e));
   }
 
@@ -553,82 +572,94 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
     void clearLane() => e.lanes.take(forward ? _Lane.next : _Lane.previous);
 
-    while (true) {
-      PageResult<T, C> result;
-      try {
-        result = await fetchPage(PageRequest<Q, C>(
-          query: query,
-          direction: direction,
-          cursor: cursor,
-          loadedCount: e.items.length,
-          signal: op.signal,
-        ));
-      } on PageCursorExpiredException {
-        if (op.discarded) return;
-        _startHead(e, query); // discards this op and resolves it with the head
-        return;
-      } catch (error, stack) {
-        if (op.discarded) return;
-        clearLane();
-        final failure = PagedError(error, stack);
-        if (forward) {
-          e.nextError = failure;
-        } else {
-          e.prevError = failure;
-        }
-        _finishOp(e);
-        _emit(e);
-        _report(query, direction, error, stack);
-        op.resolve(_stateOf(e));
-        return;
-      }
-      if (op.discarded) return;
-
-      final added = _mergeEdge(e, result.items, forward, op.startSeq);
-      final following = forward ? result.next : result.previous;
-      if (added > 0) {
-        final page = _Page<C>(added, result.previous, result.next);
-        forward ? e.pages.add(page) : e.pages.insert(0, page);
-      } else if (e.pages.isNotEmpty) {
-        // Nothing new: only the cursor moved on.
-        if (forward) {
-          e.pages.last.next = following;
-        } else {
-          e.pages.first.previous = following;
-        }
-      }
+    void fail(Object error, StackTrace stack) {
+      clearLane();
+      final failure = PagedError(error, stack);
       if (forward) {
-        e.nextCursor = following;
-        e.nextMore = following != null;
+        e.nextError = failure;
       } else {
-        e.prevCursor = following;
-        e.prevMore = following != null;
+        e.prevError = failure;
       }
-      if (result.totalCount != null) e.totalCount = result.totalCount;
-
-      if (following != null && following == cursor) {
-        // The cursor did not move: it would loop forever.
-        if (forward) {
-          e.nextMore = false;
-        } else {
-          e.prevMore = false;
-        }
-      } else if (added == 0 && following != null) {
-        if (++unproductive < maxUnproductivePages) {
-          cursor = following;
-          continue;
-        }
-        if (forward) {
-          e.nextMore = false;
-        } else {
-          e.prevMore = false;
-        }
-      }
-      break;
+      _finishOp(e);
+      _emit(e);
+      _report(query, direction, error, stack);
+      op.resolve(_stateOf(e));
     }
 
-    _normalizePages(e);
-    _window(e, forward);
+    // The apply phase runs user callbacks (`idOf`, replayed transforms). A
+    // throw fails this load like a fetch error instead of wedging the lane.
+    try {
+      while (true) {
+        PageResult<T, C> result;
+        try {
+          result = await fetchPage(PageRequest<Q, C>(
+            query: query,
+            direction: direction,
+            cursor: cursor,
+            loadedCount: e.items.length,
+            signal: op.signal,
+          ));
+        } on PageCursorExpiredException {
+          if (op.discarded) return;
+          _startHead(
+              e, query); // discards this op and resolves it with the head
+          return;
+        } catch (error, stack) {
+          if (op.discarded) return;
+          fail(error, stack);
+          return;
+        }
+        if (op.discarded) return;
+
+        final added = _mergeEdge(e, result.items, forward, op.startSeq);
+        final following = forward ? result.next : result.previous;
+        if (added > 0) {
+          final page = _Page<C>(added, result.previous, result.next);
+          forward ? e.pages.add(page) : e.pages.insert(0, page);
+        } else if (e.pages.isNotEmpty) {
+          // Nothing new: only the cursor moved on.
+          if (forward) {
+            e.pages.last.next = following;
+          } else {
+            e.pages.first.previous = following;
+          }
+        }
+        if (forward) {
+          e.nextCursor = following;
+          e.nextMore = following != null;
+        } else {
+          e.prevCursor = following;
+          e.prevMore = following != null;
+        }
+        if (result.totalCount != null) e.totalCount = result.totalCount;
+
+        if (following != null && following == cursor) {
+          // The cursor did not move: it would loop forever.
+          if (forward) {
+            e.nextMore = false;
+          } else {
+            e.prevMore = false;
+          }
+        } else if (added == 0 && following != null) {
+          if (++unproductive < maxUnproductivePages) {
+            cursor = following;
+            continue;
+          }
+          if (forward) {
+            e.nextMore = false;
+          } else {
+            e.prevMore = false;
+          }
+        }
+        break;
+      }
+
+      _normalizePages(e);
+      _window(e, forward);
+    } catch (error, stack) {
+      fail(error, stack);
+      return;
+    }
     clearLane();
     _finishOp(e);
     _emit(e);
@@ -1107,8 +1138,19 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   // --- persistence ---------------------------------------------------------
 
-  bool _persists(Q query) =>
-      storage != null && (persistWhen?.call(query) ?? true);
+  /// Whether [query] is persisted. A throwing [persistWhen] counts as "no"
+  /// and is reported to [onError]; it never fails a load.
+  bool _persists(Q query) {
+    if (storage == null) return false;
+    final when = persistWhen;
+    if (when == null) return true;
+    try {
+      return when(query);
+    } catch (error, stack) {
+      _report(query, PageDirection.initial, error, stack);
+      return false;
+    }
+  }
 
   void _persist(Q query, _Entry<T, C> e) {
     if (!_persists(query)) return;
