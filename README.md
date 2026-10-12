@@ -256,7 +256,8 @@ on `getData` complete with the fetcher's own outcome, i.e. **the fetcher's
 cancellation error** (e.g. `DioException.cancel`) if it honours the signal.
 `invalidate`, `set` and `patch` (and their `Where`/`All` variants) do not fire
 it: the request finishes, waiting callers get its result, and the result is
-not cached.
+not cached. A watched key then refetches, so briefly two requests are in
+flight; the older response is not cached.
 
 Both managers hand the fetcher the same `AbortSignal` (`signal.whenAborted`,
 `signal.aborted`): the base fetcher receives it as an argument, the paged
