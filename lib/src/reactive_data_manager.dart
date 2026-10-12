@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:reactive_data_manager/src/engine/entry_registry.dart';
 import 'package:reactive_data_manager/src/engine/errors.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
 import 'package:reactive_data_manager/src/engine/operation.dart';
@@ -10,6 +11,9 @@ import 'package:rxdart/rxdart.dart';
 class _Hydration {
   late final Future<void> future;
 }
+
+/// Watch bookkeeping of one key (it exists while the key has a subject).
+class _KeyEntry extends RegistryEntry {}
 
 /// A class that manages reactive data fetching and updating with caching and
 /// optimistic updates.
@@ -49,6 +53,19 @@ class ReactiveDataManager<K, T> {
   ///   delivered to stream listeners and to the future returned by [getData].
   /// - [storage]/[storageVersion]: optional persistence, see
   ///   [ReactiveStorage].
+  /// - [maxEntries]: how many *unwatched* keys are kept in memory (LRU by the
+  ///   moment they became unwatched; `null`, the default: unlimited). At least
+  ///   1, otherwise an [ArgumentError] is thrown. A key is watched while its
+  ///   stream ([getStream], [watch], [watchState]) has a listener; watched
+  ///   keys are never evicted, so the count may exceed the limit.
+  /// - [evictAfterUnwatched]: drops a key from memory once it has had no
+  ///   listener for this long (the timer restarts when the last listener
+  ///   leaves and is cancelled when one subscribes again).
+  ///
+  ///   Automatic eviction only frees memory: an in-flight fetch of the key is
+  ///   detached (its callers still get its result, which is not cached) and a
+  ///   persisted entry is kept, so it is restored on the next access. Explicit
+  ///   [evict]/[clearCache] also delete the persisted entry.
   /// - [storageReadTimeout]: the longest a storage read may take (`null`, the
   ///   default: no limit). A slower read counts as "nothing persisted" (the
   ///   value is fetched; the late result is dropped), so a slow or stuck
@@ -66,7 +83,11 @@ class ReactiveDataManager<K, T> {
     this.storage,
     this.storageVersion = 0,
     this.storageReadTimeout,
-  }) : _fetcher = ((key, _) => fetcher(key));
+    this.maxEntries,
+    this.evictAfterUnwatched,
+  }) : _fetcher = ((key, _) => fetcher(key)) {
+    _checkMaxEntries(maxEntries);
+  }
 
   /// Like the default constructor, but the fetcher receives a cancellation
   /// signal: a future that completes when the fetch is superseded (by
@@ -92,7 +113,17 @@ class ReactiveDataManager<K, T> {
     this.storage,
     this.storageVersion = 0,
     this.storageReadTimeout,
-  }) : _fetcher = fetcher;
+    this.maxEntries,
+    this.evictAfterUnwatched,
+  }) : _fetcher = fetcher {
+    _checkMaxEntries(maxEntries);
+  }
+
+  static void _checkMaxEntries(int? value) {
+    if (value != null && value < 1) {
+      throw ArgumentError.value(value, 'maxEntries', 'must be at least 1');
+    }
+  }
 
   final Future<T> Function(K key, Future<void> cancel) _fetcher;
 
@@ -136,6 +167,12 @@ class ReactiveDataManager<K, T> {
   /// The longest a storage read may take before it counts as missing.
   final Duration? storageReadTimeout;
 
+  /// Maximum number of unwatched keys kept in memory.
+  final int? maxEntries;
+
+  /// How long a key may stay unwatched before it is dropped from memory.
+  final Duration? evictAfterUnwatched;
+
   /// All data streams are stored in a map with the key as the identifier.
   final Map<K, BehaviorSubject<T?>> _dataSubjects = {};
 
@@ -173,18 +210,32 @@ class ReactiveDataManager<K, T> {
   late final StorageQueue<K, T> _storage =
       StorageQueue(storage, storageVersion, readTimeout: storageReadTimeout);
   late final Freshness _freshness = Freshness(clock, maxAge);
+  late final EntryRegistry<K, _KeyEntry> _entries = EntryRegistry(
+    onEvict: _evictMemory,
+    maxEntries: maxEntries,
+    evictAfterUnwatched: evictAfterUnwatched,
+  );
+  bool _disposed = false;
 
   /// Get a stream for a specific key. With [storage], a persisted value is
   /// restored into the stream when nothing is in memory (no fetch).
+  ///
+  /// Listening makes [key] watched (see [maxEntries]). The stream resolves
+  /// the key's subject when it is listened to, so a stream obtained before
+  /// the key was dropped from memory still works.
   Stream<T?> getStream(K key) {
-    final subject = _getSubjectForKey(key);
+    _getSubjectForKey(key);
     _hydrate(key)?.ignore();
-    if (replayErrors) return subject.stream;
-    final errors = _errorChannels.putIfAbsent(
-      key,
-      () => StreamController<Object>.broadcast(),
-    );
-    return Rx.merge<T?>([subject.stream, errors.stream.cast<T?>()]);
+    return Rx.defer<T?>(() {
+      final subject = _getSubjectForKey(key);
+      _hydrate(key)?.ignore();
+      if (replayErrors) return subject.stream;
+      final errors = _errorChannels.putIfAbsent(
+        key,
+        () => StreamController<Object>.broadcast(),
+      );
+      return Rx.merge<T?>([subject.stream, errors.stream.cast<T?>()]);
+    }, reusable: true);
   }
 
   /// A non-null stream of values for [key]. Fetches when the value is missing
@@ -415,8 +466,17 @@ class ReactiveDataManager<K, T> {
   }
 
   /// Marks [key] stale but keeps its value visible. A fetch that is in flight
-  /// is discarded; the next [getData] fetches again.
+  /// is discarded (its callers still get its result, which is not cached).
+  ///
+  /// A watched key (its stream has a listener) refetches immediately, errors
+  /// going only to the stream; an unwatched key is only marked and the next
+  /// [getData] fetches again.
   void invalidate(K key) {
+    _markStale(key);
+    _refetchIfWatched(key);
+  }
+
+  void _markStale(K key) {
     // An uncached key only needs marking if a persisted value may come back.
     if (_cache.containsKey(key) ||
         (storage != null && !_hydrated.contains(key))) {
@@ -425,15 +485,34 @@ class ReactiveDataManager<K, T> {
     _activeFetches.take(key)?.detach();
   }
 
-  /// [invalidate] for every cached key matching [test]. With [storage] it also
-  /// applies to persisted values restored later (stored before this call).
-  /// The predicate is kept until the next [invalidateAll] or [clearCache].
+  /// [invalidate] for every key matching [test] that is cached, being fetched
+  /// or watched. With [storage] it also applies to persisted values restored
+  /// later (stored before this call). The predicate is kept until the next
+  /// [invalidateAll] or [clearCache].
   void invalidateWhere(bool Function(K key) test) {
-    for (final key in _cache.keys.toList()) {
-      if (test(key)) invalidate(key);
+    final keys = {
+      ..._cache.keys,
+      ..._activeFetches.lanes,
+      ..._dataSubjects.keys
+    };
+    final matched = [
+      for (final key in keys)
+        if (test(key)) key,
+    ];
+    for (final key in matched) {
+      _markStale(key);
     }
-    if (storage == null) return;
-    _invalidations.add((clock(), test));
+    if (storage != null) _invalidations.add((clock(), test));
+    for (final key in matched) {
+      _refetchIfWatched(key);
+    }
+  }
+
+  /// Whether [key]'s stream has a listener.
+  bool _isWatched(K key) => _dataSubjects[key]?.hasListener ?? false;
+
+  void _refetchIfWatched(K key) {
+    if (_isWatched(key)) getData(key).ignore();
   }
 
   /// Replaces cached values across keys. For every cached key, [transform]
@@ -450,13 +529,16 @@ class ReactiveDataManager<K, T> {
     }
   }
 
-  /// [invalidate] for every key.
+  /// [invalidate] for every key: watched keys refetch.
   void invalidateAll() {
     _invalidatedAllAt = clock();
     _invalidations.clear(); // covered by the newer, wider marker
     _stale.addAll(_cache.keys);
     for (final fetch in _activeFetches.takeAll()) {
       fetch.detach();
+    }
+    for (final key in _dataSubjects.keys.toList()) {
+      _refetchIfWatched(key);
     }
   }
 
@@ -493,13 +575,49 @@ class ReactiveDataManager<K, T> {
     }
   }
 
-  /// Get or create a BehaviorSubject for a specific key
+  /// Get or create a BehaviorSubject for a specific key. A new key starts
+  /// unwatched (it may push older unwatched keys over [maxEntries]).
   BehaviorSubject<T?> _getSubjectForKey(K key) {
-    if (!_dataSubjects.containsKey(key)) {
-      _dataSubjects[key] = BehaviorSubject<T?>();
+    final existing = _dataSubjects[key];
+    if (existing != null) return existing;
+    final entry = _KeyEntry();
+    final subject = BehaviorSubject<T?>(
+      onListen: () => _entries.watch(entry),
+      onCancel: () {
+        if (_entries.unwatch(entry) && _entries.isCurrent(key, entry)) {
+          _entries.unwatched(key, entry);
+        }
+      },
+    );
+    _dataSubjects[key] = subject;
+    if (!_disposed) {
+      _entries[key] = entry;
+      _entries.unwatched(key, entry);
     }
+    return subject;
+  }
 
-    return _dataSubjects[key]!;
+  /// Automatic eviction ([maxEntries], [evictAfterUnwatched]) of an unwatched
+  /// key: memory only. The persisted entry is kept, and so is an invalidation
+  /// mark that still applies to it.
+  void _evictMemory(K key, _KeyEntry entry) {
+    _activeFetches.take(key)?.detach();
+    if (storage == null) _stale.remove(key);
+    _drop(key);
+  }
+
+  /// Forgets everything held in memory for [key] and closes its streams.
+  void _drop(K key) {
+    final entry = _entries[key];
+    if (entry != null) _entries.remove(key, entry);
+    _activeUpdates.remove(key);
+    _writeSeq.remove(key);
+    _cache.remove(key);
+    _fetchedAt.remove(key);
+    _hydrations.remove(key);
+    _hydrated.remove(key);
+    _dataSubjects.remove(key)?.close();
+    _errorChannels.remove(key)?.close();
   }
 
   // --- persistence ---------------------------------------------------------
@@ -581,21 +699,16 @@ class ReactiveDataManager<K, T> {
   /// persisted entry is deleted too.
   void evict(K key) {
     _activeFetches.take(key)?.discard();
-    _activeUpdates.remove(key);
-    _writeSeq.remove(key);
-    _cache.remove(key);
-    _fetchedAt.remove(key);
     _stale.remove(key);
-    _hydrations.remove(key);
-    _hydrated.remove(key);
     _storage.delete(key);
-    _dataSubjects.remove(key)?.close();
-    _errorChannels.remove(key)?.close();
+    _drop(key);
   }
 
   /// Dispose resources. Storage is no longer touched afterwards (`evict` and
   /// `clearCache` then only drop memory).
   void dispose() {
+    _disposed = true;
+    _entries.clear();
     _storage.close();
     for (final fetch in _activeFetches.takeAll()) {
       fetch.discard();

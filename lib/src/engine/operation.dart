@@ -84,6 +84,9 @@ class InFlight<L, O extends Operation<Object?>> {
   /// Whether nothing is in flight.
   bool get isEmpty => _ops.isEmpty;
 
+  /// The lanes with an operation, in start order.
+  Iterable<L> get lanes => _ops.keys;
+
   /// The running operations, in start order.
   Iterable<O> get all => _ops.values;
 

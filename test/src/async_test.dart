@@ -374,7 +374,10 @@ void main() {
       await m.mutate('k', () async {});
       m.refresh('k');
       await pump();
-      expect(seen, [1, 2]);
+      // The watched key refetches on mutate's invalidate (fetch 2); refresh
+      // supersedes that fetch, so only its result (3) is written.
+      expect(seen, [1, 3]);
+      expect(n, 3);
       await sub.cancel();
     });
 
