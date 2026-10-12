@@ -810,6 +810,45 @@ void main() {
       }
     }
   });
+
+  group('more coverage of the review fixes', () {
+    test('mergeHead overlapping at the last item keeps the tail cursor',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a', 'b', 'c']), next: 5);
+      final r = m.refresh('q', mode: RefreshMode.mergeHead);
+      s.completeLast(items(['x', 'a', 'b', 'c']), next: 4);
+      expect(ids(await r.bounded), ['x', 'a', 'b', 'c']);
+      final n = m.loadNext('q');
+      expect(s.requests.last.cursor, 5); // the loaded tail's cursor
+      s.completeLast(items(['d']));
+      expect(ids(await n.bounded), ['x', 'a', 'b', 'c', 'd']);
+    });
+
+    test('a failed mutate does not re-insert into a query evicted meanwhile',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      final sub = m.watch('q').listen((_) {});
+      await pump();
+      s.completeLast(items(['a', 'b']));
+      await pump();
+      await expectLater(
+        m.mutate<void>(
+          () async {
+            m.evict('q');
+            throw StateError('x');
+          },
+          optimistic: (e) => e.removeItem('a'),
+        ),
+        throwsStateError,
+      );
+      expect(m.peek('q')!.items, isEmpty);
+      expect(m.peek('q')!.hasLoaded, isFalse);
+      await sub.cancel();
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {

@@ -544,7 +544,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
         e.pages = [...head, ...rest];
         e.prevCursor = first.previous;
         e.prevMore = first.previous != null;
-        _normalizePages(e);
+        assert(_pagesMatch(e), 'page counts drifted from the list');
         return;
       }
     }
@@ -579,7 +579,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     e.nextMore = results.last.next != null;
     e.prevCursor = first.previous;
     e.prevMore = first.previous != null;
-    _normalizePages(e);
+    assert(_pagesMatch(e), 'page counts drifted from the list');
   }
 
   /// Whether [edit] is an upsert of an item absent from [list] at an end that
@@ -610,15 +610,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
     return out;
   }
 
-  /// Safety net: splices and replayed edits keep the per-page counts exact,
-  /// so this never fires in practice. Should they ever drift from the list,
-  /// the pages collapse into one (cursors are kept) rather than letting
-  /// windowing or `Retention.firstPage` cut the list at a wrong index.
-  void _normalizePages(_Entry<T, C> e) {
-    final sum = e.pages.fold<int>(0, (a, p) => a + p.count);
-    final ok = sum == e.items.length && e.pages.isNotEmpty;
-    if (!ok) e.pages = [_Page<C>(e.items.length, e.prevCursor, e.nextCursor)];
-  }
+  /// Invariant (checked in debug builds): the per-page counts add up to the
+  /// list. Splices, merges and every tracked edit keep them exact, which is
+  /// what windowing and `Retention.firstPage` rely on.
+  bool _pagesMatch(_Entry<T, C> e) =>
+      e.pages.fold<int>(0, (a, p) => a + p.count) == e.items.length;
 
   Future<void> _runEdge(
     _Entry<T, C> e,
@@ -725,7 +721,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
         break;
       }
 
-      _normalizePages(e);
+      assert(_pagesMatch(e), 'page counts drifted from the list');
       _window(e, forward);
     } catch (error, stack) {
       fail(error, stack);
@@ -1099,7 +1095,8 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   void _insertAt(Q query, T item, Object? afterId, int index) {
     final e = _entries[query];
-    if (e == null) return;
+    // Reset (evicted/cleared) meanwhile: nothing to restore the item into.
+    if (e == null || !e.hasLoaded) return;
     final edit = _Edit<T>.insertAt(++e.seq, idOf(item), item, afterId, index);
     if (_applyEdit(e.items, edit, e.pages)) {
       final total = e.totalCount;

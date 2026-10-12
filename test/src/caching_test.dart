@@ -632,6 +632,16 @@ void main() {
         storageKey: 'config',
       );
       expect(await restored.getData(), 2); // read back under its own key
+      shared.entries['old'] = StoredEntry(5, DateTime(2026), version: 1);
+      final versioned = ReactiveValue<int>(
+        fetcher: () async => 6,
+        storage: shared,
+        storageKey: 'old',
+        storageVersion: 2,
+      );
+      expect(await versioned.getData(), 6); // old version ignored and deleted
+      await pump();
+      expect(shared.entries['old']!.version, 2);
     });
 
     test('after dispose evict/clearCache/writes never touch storage', () async {
