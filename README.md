@@ -202,6 +202,11 @@ final user = await me.getData();
 me.watch().listen(print);
 ```
 
+With `storage`, a value is persisted under `storageKey` (default `'value'`).
+Values that share one storage adapter need distinct keys, e.g.
+`ReactiveValue<User>(..., storage: prefsStorage, storageKey: 'me')`; `clear()`
+deletes only that key.
+
 ### Persistence
 
 Pass a `ReactiveStorage` to keep values across restarts. On the first

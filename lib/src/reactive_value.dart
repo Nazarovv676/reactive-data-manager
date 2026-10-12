@@ -9,6 +9,8 @@ import 'package:reactive_data_manager/src/storage.dart';
 /// the other behaviours are identical; there is just no key parameter.
 class ReactiveValue<T> {
   /// Creates a value. See [ReactiveDataManager] for the parameters.
+  /// [storageKey] (default `'value'`) is the key the value is persisted under;
+  /// values sharing one [ReactiveStorage] need distinct keys.
   ReactiveValue({
     required Future<T> Function() fetcher,
     Future<dynamic> Function(T data)? updater,
@@ -20,7 +22,9 @@ class ReactiveValue<T> {
     Object Function(Object error, StackTrace stackTrace)? errorMapper,
     ReactiveStorage<String, T>? storage,
     int storageVersion = 0,
-  }) : _manager = ReactiveDataManager<String, T>(
+    String storageKey = 'value',
+  })  : _key = storageKey,
+        _manager = ReactiveDataManager<String, T>(
           fetcher: (_) => fetcher(),
           updater: updater == null ? null : (_, data) => updater(data),
           fetchFilter:
@@ -31,7 +35,7 @@ class ReactiveValue<T> {
           clock: clock,
           replayErrors: replayErrors,
           errorMapper: errorMapper,
-          storage: storage,
+          storage: storage == null ? null : _OwnKey(storage, storageKey),
           storageVersion: storageVersion,
         );
 
@@ -48,7 +52,9 @@ class ReactiveValue<T> {
     Object Function(Object error, StackTrace stackTrace)? errorMapper,
     ReactiveStorage<String, T>? storage,
     int storageVersion = 0,
-  }) : _manager = ReactiveDataManager<String, T>.cancellable(
+    String storageKey = 'value',
+  })  : _key = storageKey,
+        _manager = ReactiveDataManager<String, T>.cancellable(
           fetcher: (_, cancel) => fetcher(cancel),
           updater: updater == null ? null : (_, data) => updater(data),
           fetchFilter:
@@ -59,11 +65,13 @@ class ReactiveValue<T> {
           clock: clock,
           replayErrors: replayErrors,
           errorMapper: errorMapper,
-          storage: storage,
+          storage: storage == null ? null : _OwnKey(storage, storageKey),
           storageVersion: storageVersion,
         );
 
-  static const _key = 'value';
+  /// The key this value lives under in its manager and in [storage]. Give
+  /// values that share one storage adapter distinct keys.
+  final String _key;
 
   final ReactiveDataManager<String, T> _manager;
 
@@ -107,9 +115,31 @@ class ReactiveValue<T> {
   bool isFresh({Duration? maxAge}) => _manager.isFresh(_key, maxAge: maxAge);
 
   /// Drops the value, cancels in-flight fetches and deletes the persisted
-  /// entry.
+  /// entry (only this value's [storageKey], even in a shared storage).
   void clear() => _manager.clearCache();
 
   /// Dispose resources.
   void dispose() => _manager.dispose();
+}
+
+/// Storage seen by the manager of one [ReactiveValue]: `clear` deletes only
+/// that value's key, so values sharing one adapter do not wipe each other.
+class _OwnKey<T> implements ReactiveStorage<String, T> {
+  _OwnKey(this.inner, this.key);
+
+  final ReactiveStorage<String, T> inner;
+  final String key;
+
+  @override
+  Future<StoredEntry<T>?> read(String key) => inner.read(key);
+
+  @override
+  Future<void> write(String key, StoredEntry<T> entry) =>
+      inner.write(key, entry);
+
+  @override
+  Future<void> delete(String key) => inner.delete(key);
+
+  @override
+  Future<void> clear() => inner.delete(key);
 }

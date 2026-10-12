@@ -603,6 +603,37 @@ void main() {
       expect(storage.entries['k']!.version, 2);
     });
 
+    test('ReactiveValues sharing one storage use distinct storageKeys',
+        () async {
+      final shared = InMemoryReactiveStorage<String, int>();
+      final me = ReactiveValue<int>(
+        fetcher: () async => 1,
+        storage: shared,
+        storageKey: 'me',
+      );
+      final config = ReactiveValue<int>.cancellable(
+        fetcher: (_) async => 2,
+        storage: shared,
+        storageKey: 'config',
+      );
+      final legacy =
+          ReactiveValue<int>(fetcher: () async => 3, storage: shared);
+      expect(await me.getData(), 1);
+      expect(await config.getData(), 2);
+      expect(await legacy.getData(), 3);
+      await pump();
+      expect(shared.entries.keys, unorderedEquals(['me', 'config', 'value']));
+      me.clear();
+      await pump();
+      expect(shared.entries.keys, unorderedEquals(['config', 'value']));
+      final restored = ReactiveValue<int>(
+        fetcher: () async => 99,
+        storage: shared,
+        storageKey: 'config',
+      );
+      expect(await restored.getData(), 2); // read back under its own key
+    });
+
     group('m6', () {
       test('watch(fetch: false) restores the persisted value, no network',
           () async {
