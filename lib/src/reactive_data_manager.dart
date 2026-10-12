@@ -132,8 +132,8 @@ class ReactiveDataManager<K, T> {
   /// the stream. For a [ReactiveDataManager.cancellable] fetcher the cancel
   /// signal never fires.
   @Deprecated(
-    'Kept for 1.1.0 compatibility; use getData(key, forceRefresh: true). '
-    'Will be removed in 2.0.0.',
+    'Kept for 1.x compatibility; use getData(key, forceRefresh: true). '
+    'Will be removed in 3.0.0.',
   )
   Future<T> Function(K key) get fetcher =>
       (key) => _fetcher(key, Completer<void>().future);

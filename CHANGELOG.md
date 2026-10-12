@@ -25,7 +25,7 @@ kept (the `fetcher` field remains as a deprecated getter).
 - The unused `async` dependency was removed.
 
 ### Compatibility notes
-- The public `fetcher` field became private; a **deprecated `fetcher` getter** (`Future<T> Function(K key)`) is kept for 1.1.0 code. It calls the fetcher directly (no cache, no join); for a cancellable fetcher the cancel signal never fires. It will be removed in 2.0.0.
+- The public `fetcher` field became private; a **deprecated `fetcher` getter** (`Future<T> Function(K key)`) is kept for 1.1.0 code. It calls the fetcher directly (no cache, no join); for a cancellable fetcher the cancel signal never fires. It will be removed in 3.0.0.
 - `getData` gained the named parameter `maxAge`: subclasses overriding `getData` must add it.
 - About 20 new public members were added to `ReactiveDataManager`; hand-written `implements ReactiveDataManager` fakes must implement them (generated mocks such as mocktail are unaffected).
 - `replayErrors` defaults to `true` (1.1.0 behaviour); exceptions and existing exports are unchanged.
