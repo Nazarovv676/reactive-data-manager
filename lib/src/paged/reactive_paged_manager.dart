@@ -505,6 +505,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
         // (used when trimming back to the first page or windowing).
         final head = [_Page<C>(fresh.length, first.previous, first.next)];
         for (final edit in replay) {
+          // Tail inserts live in the kept tail, not in the fresh head.
+          if (_outsideLoadedEnd(fresh, edit,
+              headLoaded: first.previous == null, tailLoaded: false)) {
+            continue;
+          }
           _applyEdit(fresh, edit, head);
         }
         final rest = _dropFront(e.pages, at + 1);
@@ -558,8 +563,14 @@ class ReactivePagedManager<Q, T, C extends Object> {
       }
       pages.add(_Page<C>(count, r.previous, r.next));
     }
-    // Replayed edits keep the per-page counts exact.
+    // Replayed edits keep the per-page counts exact. An insert is replayed
+    // only if its end is fully loaded in the new response (see upsertItem).
     for (final edit in replay) {
+      if (_outsideLoadedEnd(list, edit,
+          headLoaded: first.previous == null,
+          tailLoaded: results.last.next == null)) {
+        continue;
+      }
       _applyEdit(list, edit, pages);
     }
     e.items = list;
@@ -569,6 +580,19 @@ class ReactivePagedManager<Q, T, C extends Object> {
     e.prevCursor = first.previous;
     e.prevMore = first.previous != null;
     _normalizePages(e);
+  }
+
+  /// Whether [edit] is an upsert of an item absent from [list] at an end that
+  /// is not fully loaded: such an item belongs to an unloaded region.
+  bool _outsideLoadedEnd(
+    List<T> list,
+    _Edit<T> edit, {
+    required bool headLoaded,
+    required bool tailLoaded,
+  }) {
+    if (edit.kind != _EditKind.upsert) return false;
+    if (edit.id != null && list.any((x) => idOf(x) == edit.id)) return false;
+    return !(edit.atHead ? headLoaded : tailLoaded);
   }
 
   /// Copies [pages] without their first [n] items.
@@ -918,8 +942,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// A present item is replaced in place, or moved to [at] with [move]. An
   /// absent item is inserted at [at] only when that end is fully loaded
   /// (`at: head` needs no previous page, `at: tail` needs no next page);
-  /// otherwise it belongs to an unloaded region and is ignored. Does nothing
-  /// when [query] is not cached.
+  /// otherwise it belongs to an unloaded region and is ignored. Nothing counts
+  /// as fully loaded before the first page arrived, nor for a snapshot
+  /// restored from storage that was not revalidated yet. When an insert made
+  /// during a refresh is replayed onto its response, the rule is checked again
+  /// against the new cursors. Does nothing when [query] is not cached.
   void upsertItem(
     Q query,
     T item, {
@@ -931,9 +958,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
     final id = idOf(item);
     final present = id != null && e.items.any((x) => idOf(x) == id);
     if (!present) {
-      final endLoaded = at == PagedEnd.head
-          ? !e.prevMore
-          : (e.hasLoaded || e.head != null) && !e.nextMore;
+      // Nothing (or only a restored snapshot without cursors) is loaded: no
+      // end is known to be complete.
+      final loaded = e.hasLoaded && !e.hydrated;
+      final endLoaded =
+          loaded && (at == PagedEnd.head ? !e.prevMore : !e.nextMore);
       if (!endLoaded) return;
     }
     final edit = _Edit<T>.upsert(++e.seq, id, item, at == PagedEnd.head, move);

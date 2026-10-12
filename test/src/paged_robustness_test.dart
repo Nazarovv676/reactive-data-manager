@@ -555,6 +555,99 @@ void main() {
       expect(m.peek('q')!.next.hasMore, isTrue);
     });
   });
+
+  group('m5: upsertItem gate', () {
+    test('ignored on a never-loaded entry (e.g. after an initial error)',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      final f = m.refresh('q');
+      m.upsertItem('q', it('x')); // first load in flight
+      m.upsertItem('q', it('y'), at: PagedEnd.tail);
+      s.failLast(StateError('down'));
+      final st = await f.bounded;
+      expect(st.hasInitialError, isTrue);
+      m.upsertItem('q', it('x'));
+      m.upsertItem('q', it('y'), at: PagedEnd.tail);
+      expect(m.peek('q')!.items, isEmpty);
+      expect(m.peek('q')!.hasLoaded, isFalse);
+      final r = m.refresh('q');
+      s.completeLast(items(['a']));
+      expect(ids(await r.bounded), ['a']);
+    });
+
+    test('ignored on a hydrated entry; applied after revalidation', () async {
+      final storage = InMemoryReactiveStorage<String, PagedSnapshot<Item>>()
+        ..entries['q'] = StoredEntry(
+          PagedSnapshot(items(['a', 'b'])),
+          DateTime(2025),
+        );
+      final s = Scripted();
+      final m = make(s, storage: storage);
+      final sub = m.watch('q').listen((_) {});
+      await settle();
+      expect(ids(m.peek('q')), ['a', 'b']); // restored, revalidating
+      m.upsertItem('q', it('z'), at: PagedEnd.tail);
+      m.upsertItem('q', it('h'));
+      expect(ids(m.peek('q')), ['a', 'b']);
+      m.upsertItem('q', it('a', 5)); // present: replaced in place
+      expect(m.peek('q')!.items.first, it('a', 5));
+      s.completeLast(items(['a', 'b', 'c', 'd']), next: 2);
+      await settle();
+      expect(ids(m.peek('q')), ['a', 'b', 'c', 'd']);
+      m.upsertItem('q', it('h'));
+      expect(ids(m.peek('q')), ['h', 'a', 'b', 'c', 'd']);
+      await sub.cancel();
+    });
+
+    test('a replayed tail insert is dropped when the new response has more',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a', 'b']));
+      final f = m.refresh('q');
+      m.upsertItem('q', it('z'), at: PagedEnd.tail); // tail loaded right now
+      expect(ids(m.peek('q')), ['a', 'b', 'z']);
+      s.completeLast(items(['a', 'b', 'c', 'd']), next: 2);
+      final st = await f.bounded;
+      expect(ids(st), ['a', 'b', 'c', 'd']); // z is in an unloaded region
+      expect(st.next.hasMore, isTrue);
+    });
+
+    test('a replayed head insert is dropped when a previous page appeared',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a']));
+      final f = m.refresh('q');
+      m.upsertItem('q', it('h'));
+      s.completeLast(items(['a']), previous: 0);
+      expect(ids(await f.bounded), ['a']);
+    });
+
+    test('a replayed tail insert is kept when the tail is still loaded',
+        () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a']));
+      final f = m.refresh('q');
+      m.upsertItem('q', it('z'), at: PagedEnd.tail);
+      m.upsertItem('q', it('a', 1)); // present everywhere
+      s.completeLast(items(['a', 'b']));
+      expect((await f.bounded).items, [it('a', 1), it('b'), it('z')]);
+    });
+
+    test('mergeHead: a tail insert stays in the kept tail', () async {
+      final s = Scripted();
+      final m = make(s);
+      await seed(m, s, 'q', items(['a', 'b', 'c']));
+      final f = m.refresh('q', mode: RefreshMode.mergeHead);
+      m.upsertItem('q', it('z'), at: PagedEnd.tail);
+      m.upsertItem('q', it('h'));
+      s.completeLast(items(['x', 'a', 'b']));
+      expect(ids(await f.bounded), ['h', 'x', 'a', 'b', 'c', 'z']);
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {

@@ -352,7 +352,10 @@ Rules worth knowing:
   recovery is always a `RefreshMode.firstPage` refresh, whatever the
   `refreshMode`.
 - `upsertItem` inserts an *absent* item only if that end is fully loaded
-  (`at: head` needs no previous page), otherwise it is ignored.
+  (`at: head` needs no previous page), otherwise it is ignored. Nothing counts
+  as fully loaded before the first page arrived or while a restored snapshot
+  is not revalidated yet. An insert made during a refresh is re-checked
+  against the cursors of the refreshed page.
 - Unwatched queries: `maxEntries` evicts the least recently watched one,
   `evictAfterUnwatched` evicts after a timer that re-watching cancels, and
   `retainWhenUnwatched: Retention.firstPage` trims to the first page.
