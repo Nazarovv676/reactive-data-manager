@@ -3,8 +3,9 @@ import 'dart:async';
 import 'package:reactive_data_manager/src/storage.dart';
 
 /// Storage plumbing shared by the managers. Writes, deletes and clears run one
-/// after another; adapter errors never escape. Every method is a no-op (or
-/// reads `null`) without a [storage].
+/// after another, and reads run after the operations queued before them;
+/// adapter errors (also synchronous throws) never escape. Every method is a
+/// no-op (or reads `null`) without a [storage].
 class StorageQueue<K, V> {
   /// Creates a queue over [storage]; entries are written with [version].
   StorageQueue(this.storage, this.version);
@@ -29,14 +30,22 @@ class StorageQueue<K, V> {
   void clear() => _enqueue((s) => s.clear());
 
   /// Reads the entry for [key]; a failing adapter reads as `null`.
-  Future<StoredEntry<V>?> read(K key) async {
+  ///
+  /// The read runs after every write, delete and clear queued before it, so
+  /// it never sees an entry that an earlier `evict`/`clearCache` is about to
+  /// delete. It does not hold up operations queued after it.
+  Future<StoredEntry<V>?> read(K key) {
     final s = storage;
-    if (s == null) return null;
-    try {
-      return await s.read(key);
-    } catch (_) {
-      return null;
-    }
+    if (s == null) return Future.value();
+    final result = Completer<StoredEntry<V>?>();
+    _tail.then((_) async {
+      try {
+        result.complete(await s.read(key));
+      } catch (_) {
+        result.complete(null);
+      }
+    });
+    return result.future;
   }
 
   /// Whether [entry] was written with [version]. Otherwise it is deleted.

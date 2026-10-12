@@ -392,6 +392,62 @@ void main() {
       expect(await Future.wait([m.getData('a'), m.getData('b')]), [1, 2]);
     });
 
+    // B1: no pump between clearCache/evict and the next read. The storage read
+    // must be ordered behind the queued delete/clear.
+    for (final action in <String, void Function(ReactiveDataManager)>{
+      'clearCache': (m) => m.clearCache(),
+      'evict': (m) => m.evict('me'),
+    }.entries) {
+      test('${action.key} then getData right away never resurrects', () async {
+        final storage = InMemoryReactiveStorage<String, String>();
+        var user = 'alice';
+        var calls = 0;
+        final m = ReactiveDataManager<String, String>(
+          fetcher: (_) async {
+            calls++;
+            return 'profile-of-$user';
+          },
+          storage: storage,
+        );
+        expect(await m.getData('me'), 'profile-of-alice');
+        await pump();
+        expect(storage.entries['me']!.value, 'profile-of-alice');
+        action.value(m);
+        user = 'bob';
+        expect(await m.getData('me'), 'profile-of-bob');
+        expect(calls, 2);
+        expect(m.getCurrentValue('me'), 'profile-of-bob');
+      });
+
+      test('${action.key} then watch right away never resurrects', () async {
+        final storage = InMemoryReactiveStorage<String, String>()
+          ..entries['me'] = StoredEntry('profile-of-alice', DateTime(2026));
+        final m = ReactiveDataManager<String, String>(
+          fetcher: (_) async => 'profile-of-bob',
+          storage: storage,
+        );
+        action.value(m);
+        final seen = <String>[];
+        final sub = m.watch('me').listen(seen.add);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(seen, ['profile-of-bob']);
+        await sub.cancel();
+      });
+    }
+
+    test('a slow pending write delays a later read until it landed', () async {
+      final storage =
+          _LoggingStorage([], delay: const Duration(milliseconds: 20));
+      final m = ReactiveDataManager<String, int>(
+        fetcher: (_) async => 1,
+        storage: storage,
+      );
+      m.set('k', 5);
+      m.evict('k');
+      expect(await m.getData('k'), 1);
+      expect(storage.log, ['w5', 'd', 'r']);
+    });
+
     test('clearCache after hydration reads storage again only if refilled',
         () async {
       final storage = InMemoryReactiveStorage<String, int>()
@@ -401,11 +457,10 @@ void main() {
         fetcher: (_) async => ++n,
         storage: storage,
       );
-      await m.getData('k');
-      m.clearCache();
-      await pump();
-      expect(storage.entries, isEmpty);
+      expect(await m.getData('k'), 7);
+      m.clearCache(); // no pump: the read below is ordered behind the clear
       expect(await m.getData('k'), 1); // hydrated value was cleared
+      expect(n, 1);
     });
   });
 
@@ -453,7 +508,11 @@ class _LoggingStorage implements ReactiveStorage<String, int> {
   final List<String> log;
   final Duration delay;
   @override
-  Future<StoredEntry<int>?> read(String key) async => null;
+  Future<StoredEntry<int>?> read(String key) async {
+    log.add('r');
+    return null;
+  }
+
   @override
   Future<void> write(String key, StoredEntry<int> entry) async {
     await Future<void>.delayed(delay);

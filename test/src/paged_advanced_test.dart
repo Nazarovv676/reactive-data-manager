@@ -678,6 +678,49 @@ void main() {
       expect(storage.entries['q']!.version, 2); // replaced by the new write
     });
 
+    // B1: no pump between evict/clearCache and the next watch/refresh.
+    for (final action
+        in <String, void Function(ReactivePagedManager<String, Item, int>)>{
+      'clearCache': (m) => m.clearCache(),
+      'evict': (m) => m.evict('inbox'),
+    }.entries) {
+      test('${action.key} then watch right away never emits the old page',
+          () async {
+        final s = ScriptedPageFetcher<String, Item, int>();
+        final m = make(s, storage: storage);
+        await seed(m, s, 'inbox', items(['alice-secret']));
+        await settle();
+        expect(storage.entries, isNotEmpty);
+        action.value(m);
+        final states = <PagedState<Item>>[];
+        final sub = m.watch('inbox').listen(states.add);
+        await settle();
+        expect(
+          states.expand((st) => st.items).map((i) => i.id),
+          isNot(contains('alice-secret')),
+        );
+        s.completeLast(items(['bob']));
+        await settle();
+        expect(ids(states.last), ['bob']);
+        expect(states.any((st) => st.hasLoaded && st.items.isEmpty), isFalse);
+        await sub.cancel();
+      });
+
+      test('${action.key} then loadNext right away fetches, not hydrates',
+          () async {
+        final s = ScriptedPageFetcher<String, Item, int>();
+        final m = make(s, storage: storage);
+        await seed(m, s, 'inbox', items(['alice-secret']), next: 2);
+        await settle();
+        action.value(m);
+        final f = m.loadNext('inbox');
+        await settle();
+        expect(m.peek('inbox')!.items, isEmpty);
+        s.completeLast(items(['bob']));
+        expect(ids(await f), ['bob']);
+      });
+    }
+
     test('evict during hydration drops the stored snapshot', () async {
       final slow = Completer<void>();
       final inner = InMemoryReactiveStorage<String, PagedSnapshot<Item>>()
