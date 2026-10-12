@@ -189,7 +189,9 @@ ReactiveDataManager<int, User>(
 );
 ```
 
-Watched keys are never evicted. Automatic eviction frees memory only: an
+Watched keys are never evicted. Any `getData`/`prefetch`/`refresh` of an
+unwatched key counts as use: it restarts the `evictAfterUnwatched` timer and
+refreshes the key's LRU position. Automatic eviction frees memory only: an
 in-flight fetch of the key is detached (its callers still get its result, which
 is not cached) and a persisted value is kept and restored on the next access.
 Explicit `evict(key)` and `clearCache()` also delete the persisted entries;

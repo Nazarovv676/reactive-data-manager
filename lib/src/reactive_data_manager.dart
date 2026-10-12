@@ -62,7 +62,9 @@ class ReactiveDataManager<K, T> {
   ///   keys are never evicted, so the count may exceed the limit.
   /// - [evictAfterUnwatched]: drops a key from memory once it has had no
   ///   listener for this long (the timer restarts when the last listener
-  ///   leaves and is cancelled when one subscribes again).
+  ///   leaves and is cancelled when one subscribes again). A [getData] of an
+  ///   unwatched key (so also [prefetch] and [refresh]) counts as use: it
+  ///   restarts the timer and refreshes the key's [maxEntries] position.
   ///
   ///   Automatic eviction only frees memory: an in-flight fetch of the key is
   ///   detached (its callers still get its result, which is not cached) and a
@@ -429,6 +431,11 @@ class ReactiveDataManager<K, T> {
   }) async {
     final hydration = _hydrate(key);
     if (hydration != null) await hydration;
+
+    // Any read of an unwatched key counts as use: its eviction timer restarts
+    // and it becomes the most recent for `maxEntries` (a no-op while watched).
+    final entry = _entries[key];
+    if (entry != null) _entries.touch(key, entry);
 
     if (!forceRefresh) {
       if (isFresh(key, maxAge: maxAge)) {

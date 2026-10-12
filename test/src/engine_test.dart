@@ -151,5 +151,34 @@ void main() {
         expect(reg.snapshot(), isEmpty);
       });
     });
+
+    test('touch restarts the timer of an unwatched current entry only', () {
+      fakeAsync((async) {
+        final evicted = <String>[];
+        final reg = EntryRegistry<String, _E>(
+          evictAfterUnwatched: const Duration(seconds: 5),
+          onEvict: (k, e) => evicted.add(k),
+        );
+        final a = _E();
+        final watched = _E();
+        final stale = _E();
+        reg['a'] = a;
+        reg.unwatched('a', a);
+        reg['w'] = watched;
+        reg.watch(watched);
+        reg['s'] = stale;
+        reg['s'] = _E(); // `stale` is no longer the current entry
+        async.elapse(const Duration(seconds: 4));
+        reg.touch('a', a); // restarted: due at 9 s instead of 5 s
+        reg.touch('w', watched); // watched: no timer
+        reg.touch('s', stale); // replaced: no timer
+        async.elapse(const Duration(seconds: 4));
+        expect(evicted, isEmpty);
+        async.elapse(const Duration(seconds: 1));
+        expect(evicted, ['a']);
+        async.elapse(const Duration(minutes: 1));
+        expect(evicted, ['a']);
+      });
+    });
   });
 }

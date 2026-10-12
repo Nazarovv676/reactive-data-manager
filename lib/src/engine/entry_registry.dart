@@ -88,6 +88,16 @@ class EntryRegistry<K, E extends RegistryEntry> {
   /// unwatched entry, its eviction timer starts, and the least recently
   /// watched entries over [maxEntries] are evicted.
   void unwatched(K key, E entry) {
+    touch(key, entry);
+    _enforceMaxEntries();
+  }
+
+  /// [entry] was used without being watched: it becomes the most recently
+  /// unwatched entry and its eviction timer restarts. Unlike [unwatched] it
+  /// does not enforce [maxEntries]: the touched entry is the newest, so it
+  /// cannot be the one evicted. A no-op while watched or once replaced.
+  void touch(K key, E entry) {
+    if (entry._watchers != 0 || !isCurrent(key, entry)) return;
     entry._lastUnwatched = ++_tick;
     entry._cancelTimer();
     final after = evictAfterUnwatched;
@@ -96,7 +106,6 @@ class EntryRegistry<K, E extends RegistryEntry> {
         if (entry._watchers == 0 && isCurrent(key, entry)) onEvict(key, entry);
       });
     }
-    _enforceMaxEntries();
   }
 
   void _enforceMaxEntries() {
