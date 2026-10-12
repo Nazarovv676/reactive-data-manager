@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:reactive_data_manager/src/engine/errors.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
 import 'package:reactive_data_manager/src/engine/operation.dart';
 import 'package:reactive_data_manager/src/engine/storage_queue.dart';
@@ -257,7 +258,7 @@ class ReactiveDataManager<K, T> {
       try {
         result = await _fetcher(key, fetch.signal.whenAborted);
       } catch (e, s) {
-        final error = _mapError(e, s);
+        final error = mapError(errorMapper, e, s);
         if (!fetch.discarded) _emitError(key, error, s);
         fetch.fail(error, s);
         return;
@@ -282,18 +283,6 @@ class ReactiveDataManager<K, T> {
       fetch.fail(e, s);
     } finally {
       _finish(key, fetch);
-    }
-  }
-
-  /// [errorMapper] applied to [error]; a throwing mapper falls back to the raw
-  /// error.
-  Object _mapError(Object error, StackTrace stackTrace) {
-    final mapper = errorMapper;
-    if (mapper == null) return error;
-    try {
-      return mapper(error, stackTrace);
-    } catch (_) {
-      return error;
     }
   }
 

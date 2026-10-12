@@ -149,4 +149,128 @@ void main() {
       expect(st.previous.error, isNull);
     });
   });
+
+  group('errorMapper', () {
+    Manager mapped(
+      Scripted s, {
+      required Object Function(Object, StackTrace) mapper,
+      List<Object>? reported,
+      RefreshMode mode = RefreshMode.firstPage,
+    }) =>
+        ReactivePagedManager<String, Item, int>(
+          fetchPage: s.call,
+          idOf: (i) => i.id,
+          refreshMode: mode,
+          errorMapper: mapper,
+          onError: (q, d, e, st) => reported?.add(e),
+        );
+
+    test('maps head errors into the state and onError', () async {
+      final s = Scripted();
+      final reported = <Object>[];
+      final m =
+          mapped(s, mapper: (e, st) => _Failure('$e'), reported: reported);
+      final f = m.refresh('q');
+      final trace = StackTrace.current;
+      s.failLast(StateError('boom'), trace);
+      final st = await f;
+      expect(st.refreshError!.error, const _Failure('Bad state: boom'));
+      expect(st.refreshError!.errorAs<_Failure>()!.message, 'Bad state: boom');
+      expect(st.refreshError!.stackTrace, trace);
+      expect(st.hasInitialError, isTrue);
+      expect(reported, [const _Failure('Bad state: boom')]);
+    });
+
+    test('maps next and previous errors', () async {
+      final s = Scripted();
+      final reported = <Object>[];
+      final m = mapped(s, mapper: (e, st) => 'mapped', reported: reported);
+      await seed(m, s, 'q', items(['b']), next: 2, previous: 0);
+      final n = m.loadNext('q');
+      s.failLast(StateError('n'));
+      expect((await n).next.error!.error, 'mapped');
+      final p = m.loadPrevious('q');
+      s.failLast(StateError('p'));
+      final st = await p;
+      expect(st.previous.error!.error, 'mapped');
+      expect(st.previous.error!.errorAs<int>(), isNull);
+      expect(reported, ['mapped', 'mapped']);
+    });
+
+    test('maps an error of a later page of RefreshMode.allPages', () async {
+      final s = Scripted();
+      final m =
+          mapped(s, mapper: (e, st) => 'mapped', mode: RefreshMode.allPages);
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final n = m.loadNext('q');
+      s.completeLast(items(['b']));
+      await n;
+      final r = m.refresh('q');
+      s.completeLast(items(['a']), next: 2);
+      await pump();
+      s.failLast(StateError('page 2'));
+      final st = await r;
+      expect(st.refreshError!.error, 'mapped');
+      expect(ids(st), ['a', 'b']); // old window kept
+    });
+
+    test('a throwing mapper falls back to the raw error', () async {
+      final s = Scripted();
+      final m = mapped(s, mapper: (e, st) => throw ArgumentError('bug'));
+      final f = m.refresh('q');
+      final boom = StateError('boom');
+      s.failLast(boom);
+      expect((await f).refreshError!.error, same(boom));
+      // The lane is not wedged.
+      final g = m.refresh('q');
+      s.completeLast(items(['a']));
+      expect(ids(await g), ['a']);
+    });
+
+    test('an expired cursor is recovered, never mapped', () async {
+      final s = Scripted();
+      final mapperCalls = <Object>[];
+      final m = mapped(s, mapper: (e, st) {
+        mapperCalls.add(e);
+        return 'mapped';
+      });
+      await seed(m, s, 'q', items(['a']), next: 2);
+      final n = m.loadNext('q');
+      s.failLast(const PageCursorExpiredException());
+      await pump();
+      expect(s.requests.last.direction, PageDirection.initial);
+      s.completeLast(items(['a', 'b']));
+      final st = await n;
+      expect(ids(st), ['a', 'b']);
+      expect(st.next.error, isNull);
+      expect(mapperCalls, isEmpty);
+    });
+
+    test('errors of a discarded load are not mapped', () async {
+      final s = Scripted();
+      final mapperCalls = <Object>[];
+      final m = mapped(s, mapper: (e, st) {
+        mapperCalls.add(e);
+        return 'mapped';
+      });
+      final f = m.refresh('q');
+      m.evict('q');
+      s.failLast(StateError('late'));
+      await f;
+      await pump();
+      expect(mapperCalls, isEmpty);
+    });
+  });
+}
+
+class _Failure {
+  const _Failure(this.message);
+  final String message;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _Failure && other.message == message;
+
+  @override
+  int get hashCode => message.hashCode;
 }

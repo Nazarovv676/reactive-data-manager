@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 
 import 'package:meta/meta.dart';
 import 'package:reactive_data_manager/src/engine/entry_registry.dart';
+import 'package:reactive_data_manager/src/engine/errors.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
 import 'package:reactive_data_manager/src/engine/operation.dart';
 import 'package:reactive_data_manager/src/engine/storage_queue.dart';
@@ -196,6 +197,13 @@ class ReactivePagedManager<Q, T, C extends Object> {
   ///   refreshes the first page before paging. `evict`/`clearCache` delete the
   ///   persisted entries; LRU/timer eviction only drops memory. Storage errors
   ///   never fail a load.
+  /// - [errorMapper]: converts errors thrown by [fetchPage] into the object
+  ///   stored in [PagedError] and passed to [onError] (e.g. unwrap a wrapper
+  ///   exception into the app's failure type, then read it with
+  ///   `PagedError.errorAs<E>()`). A throwing mapper falls back to the raw
+  ///   error. A [PageCursorExpiredException] that triggers the first-page
+  ///   recovery is never mapped. Only fetch errors are mapped, not errors of
+  ///   the manager's own callbacks (`idOf`, `persistWhen`, ...).
   /// - [onError]: notified of every fetch failure (also exposed in the state).
   /// - [clock]: injectable time source.
   ReactivePagedManager({
@@ -212,6 +220,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     this.storage,
     this.persistWhen,
     this.storageVersion = 0,
+    this.errorMapper,
     this.onError,
     this.clock = DateTime.now,
   }) {
@@ -265,6 +274,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   /// Entries persisted with a different version are ignored and deleted.
   final int storageVersion;
+
+  /// Maps errors thrown by [fetchPage] before they are stored and reported.
+  final Object Function(Object error, StackTrace stackTrace)? errorMapper;
 
   /// Failure callback.
   final void Function(
@@ -456,7 +468,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
       }
     } catch (error, stack) {
       if (op.discarded) return;
-      _failHead(e, query, op, error, stack);
+      _failHead(e, query, op, mapError(errorMapper, error, stack), stack);
       return;
     }
     if (op.discarded) return;
@@ -685,7 +697,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
           return;
         } catch (error, stack) {
           if (op.discarded) return;
-          fail(error, stack);
+          fail(mapError(errorMapper, error, stack), stack);
           return;
         }
         if (op.discarded) return;
