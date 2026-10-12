@@ -501,22 +501,42 @@ class ReactivePagedManager<Q, T, C extends Object> {
       final at =
           lastId == null ? -1 : e.items.indexWhere((x) => idOf(x) == lastId);
       if (at >= 0) {
+        // The fresh page's own `next` is where the server continues after it
+        // (used when trimming back to the first page or windowing).
+        final head = [_Page<C>(fresh.length, first.previous, first.next)];
         for (final edit in replay) {
-          _applyEdit(fresh, edit);
+          _applyEdit(fresh, edit, head);
         }
-        final freshCount = fresh.length;
         final rest = _dropFront(e.pages, at + 1);
-        if (rest.isNotEmpty) rest.first.previous = null; // boundary unknown
-        final pages = <_Page<C>>[
-          _Page<C>(
-            freshCount,
-            first.previous,
-            rest.isEmpty ? e.nextCursor : null,
-          ),
-          ...rest,
-        ];
-        e.items = _dedupe([...fresh, ...e.items.sublist(at + 1)]);
-        e.pages = pages;
+        if (rest.isNotEmpty) {
+          rest.first.previous = null; // boundary unknown
+        } else {
+          head.first.next = e.nextCursor; // the head is the whole list
+        }
+        // Items of the loaded tail that the fresh head now contains (e.g. an
+        // item bumped to the top) are dropped from the page that owned them,
+        // so per-page counts stay exact.
+        final seen = <Object>{};
+        for (final item in fresh) {
+          final id = idOf(item);
+          if (id != null) seen.add(id);
+        }
+        final tail = <T>[];
+        var index = at + 1;
+        for (final page in rest) {
+          final end = index + page.count;
+          for (; index < end; index++) {
+            final item = e.items[index];
+            final id = idOf(item);
+            if (id == null || seen.add(id)) {
+              tail.add(item);
+            } else {
+              page.count--;
+            }
+          }
+        }
+        e.items = [...fresh, ...tail];
+        e.pages = [...head, ...rest];
         e.prevCursor = first.previous;
         e.prevMore = first.previous != null;
         _normalizePages(e);
@@ -538,8 +558,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
       }
       pages.add(_Page<C>(count, r.previous, r.next));
     }
+    // Replayed edits keep the per-page counts exact.
     for (final edit in replay) {
-      _applyEdit(list, edit);
+      _applyEdit(list, edit, pages);
     }
     e.items = list;
     e.pages = pages;
@@ -565,14 +586,14 @@ class ReactivePagedManager<Q, T, C extends Object> {
     return out;
   }
 
-  /// Keeps the page counts consistent with the list. When local edits or
-  /// dedupe made them drift, the pages collapse into one (no windowing
-  /// granularity, cursors are kept).
+  /// Safety net: splices and replayed edits keep the per-page counts exact,
+  /// so this never fires in practice. Should they ever drift from the list,
+  /// the pages collapse into one (cursors are kept) rather than letting
+  /// windowing or `Retention.firstPage` cut the list at a wrong index.
   void _normalizePages(_Entry<T, C> e) {
     final sum = e.pages.fold<int>(0, (a, p) => a + p.count);
-    if (sum != e.items.length || e.pages.isEmpty) {
-      e.pages = [_Page<C>(e.items.length, e.prevCursor, e.nextCursor)];
-    }
+    final ok = sum == e.items.length && e.pages.isNotEmpty;
+    if (!ok) e.pages = [_Page<C>(e.items.length, e.prevCursor, e.nextCursor)];
   }
 
   Future<void> _runEdge(
@@ -757,9 +778,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
     return added.length;
   }
 
-  /// Applies [edit] to [list]. With [track], the entry's page counts follow.
-  /// Returns whether anything changed.
-  bool _applyEdit(List<T> list, _Edit<T> edit, [_Entry<T, C>? track]) {
+  /// Applies [edit] to [list]. With [track] (the pages of [list]), the page
+  /// counts follow. Returns whether anything changed.
+  bool _applyEdit(List<T> list, _Edit<T> edit, [List<_Page<C>>? track]) {
     void removeAt(int i) {
       list.removeAt(i);
       if (track != null) _trackRemove(track, i);
@@ -817,9 +838,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
     }
   }
 
-  void _trackRemove(_Entry<T, C> e, int index) {
+  void _trackRemove(List<_Page<C>> pages, int index) {
     var start = 0;
-    for (final page in e.pages) {
+    for (final page in pages) {
       if (index < start + page.count) {
         page.count--;
         return;
@@ -828,17 +849,17 @@ class ReactivePagedManager<Q, T, C extends Object> {
     }
   }
 
-  void _trackInsert(_Entry<T, C> e, int index) {
-    if (e.pages.isEmpty) return;
+  void _trackInsert(List<_Page<C>> pages, int index) {
+    if (pages.isEmpty) return;
     var start = 0;
-    for (final page in e.pages) {
+    for (final page in pages) {
       if (index < start + page.count) {
         page.count++;
         return;
       }
       start += page.count;
     }
-    e.pages.last.count++;
+    pages.last.count++;
   }
 
   void _record(_Entry<T, C> e, _Edit<T> edit) {
@@ -869,7 +890,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
       if (where != null && !where(entry.key)) continue;
       final e = entry.value;
       final edit = _Edit<T>.patch(++e.seq, id, transform);
-      final changed = _applyEdit(e.items, edit, e);
+      final changed = _applyEdit(e.items, edit, e.pages);
       _record(e, edit); // also when nothing changed: a response may need it
       if (changed) _emit(e);
     }
@@ -882,7 +903,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
       if (where != null && !where(entry.key)) continue;
       final e = entry.value;
       final edit = _Edit<T>.remove(++e.seq, id);
-      final changed = _applyEdit(e.items, edit, e);
+      final changed = _applyEdit(e.items, edit, e.pages);
       if (changed) {
         final total = e.totalCount;
         if (total != null && total > 0) e.totalCount = total - 1;
@@ -916,7 +937,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
       if (!endLoaded) return;
     }
     final edit = _Edit<T>.upsert(++e.seq, id, item, at == PagedEnd.head, move);
-    _applyEdit(e.items, edit, e);
+    _applyEdit(e.items, edit, e.pages);
     if (!present) {
       final total = e.totalCount;
       if (total != null) e.totalCount = total + 1;
@@ -1051,7 +1072,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     final e = _entries[query];
     if (e == null) return;
     final edit = _Edit<T>.insertAt(++e.seq, idOf(item), item, afterId, index);
-    if (_applyEdit(e.items, edit, e)) {
+    if (_applyEdit(e.items, edit, e.pages)) {
       final total = e.totalCount;
       if (total != null) e.totalCount = total + 1;
       _record(e, edit);

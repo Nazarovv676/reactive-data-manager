@@ -444,6 +444,117 @@ void main() {
       expect(st.previous.hasMore, isTrue);
     });
   });
+
+  group('m4: page accounting survives mergeHead and replayed edits', () {
+    test('mergeHead with a bumped item, then Retention.firstPage', () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        retainWhenUnwatched: Retention.firstPage,
+      );
+      final states = <PagedState<Item>>[];
+      final sub = m.watch('q').listen(states.add);
+      await pump();
+      s.completeLast(items(['a', 'b']), next: 2);
+      await pump();
+      final n = m.loadNext('q');
+      s.completeLast(items(['c', 'd']), next: 3);
+      await n;
+      final r = m.refresh('q', mode: RefreshMode.mergeHead);
+      s.completeLast(items(['d', 'a', 'b']), next: 7); // d bumped to the top
+      expect(ids(await r.bounded), ['d', 'a', 'b', 'c']);
+      expect(m.peek('q')!.next.hasMore, isTrue);
+      await sub.cancel();
+      final trimmed = m.peek('q')!;
+      expect(ids(trimmed), ['d', 'a', 'b']); // only the fresh first page
+      expect(trimmed.next.hasMore, isTrue);
+      final more = m.loadNext('q');
+      expect(s.requests.last.cursor, 7); // continues after the fresh page
+      s.completeLast(items(['c', 'e']));
+      expect(ids(await more.bounded), ['d', 'a', 'b', 'c', 'e']);
+    });
+
+    test('mergeHead keeps the page boundaries of the spliced tail', () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        maxItems: 4,
+      );
+      await seed(m, s, 'q', items(['a', 'b']), next: 2);
+      var n = m.loadNext('q');
+      s.completeLast(items(['c', 'd']), next: 3, previous: 1);
+      await n;
+      final r = m.refresh('q', mode: RefreshMode.mergeHead);
+      s.completeLast(items(['x', 'a', 'b']), next: 2);
+      expect(ids(await r.bounded), ['x', 'a', 'b', 'c', 'd']);
+      // Over maxItems on the next load: whole pages drop from the head side
+      // only when their boundary cursor is known (it is not after a splice).
+      n = m.loadNext('q');
+      s.completeLast(items(['e']), next: 4, previous: 3);
+      final st = await n.bounded;
+      expect(ids(st), ['x', 'a', 'b', 'c', 'd', 'e']);
+      expect(st.previous.hasMore, isFalse);
+    });
+
+    test('maxItems after an allPages refresh with replayed edits', () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        refreshMode: RefreshMode.allPages,
+        maxItems: 4,
+      );
+      await seed(m, s, 'q', items(['a', 'b']), next: 2);
+      var n = m.loadNext('q');
+      s.completeLast(items(['c', 'd']), next: 3, previous: 1);
+      await n;
+      final r = m.refresh('q');
+      m.removeItem('a'); // replayed onto the refreshed pages
+      s.completeLast(items(['a', 'b']), next: 2);
+      await pump();
+      s.completeLast(items(['c', 'd']), next: 3, previous: 1);
+      expect(ids(await r.bounded), ['b', 'c', 'd']);
+      n = m.loadNext('q');
+      s.completeLast(items(['e', 'f']), next: 4, previous: 2);
+      final st = await n.bounded;
+      // Exactly the first page (now just 'b') was dropped.
+      expect(ids(st), ['c', 'd', 'e', 'f']);
+      expect(st.previous.hasMore, isTrue);
+      final p = m.loadPrevious('q');
+      expect(s.requests.last.cursor, 1);
+      s.completeLast(items(['b']));
+      expect(ids(await p.bounded).first, 'b');
+    });
+
+    test('Retention.firstPage after a refresh with a replayed upsert',
+        () async {
+      final s = Scripted();
+      final m = ReactivePagedManager<String, Item, int>(
+        fetchPage: s.call,
+        idOf: (i) => i.id,
+        refreshMode: RefreshMode.allPages,
+        retainWhenUnwatched: Retention.firstPage,
+      );
+      final sub = m.watch('q').listen((_) {});
+      await pump();
+      s.completeLast(items(['a', 'b']), next: 2);
+      await pump();
+      final n = m.loadNext('q');
+      s.completeLast(items(['c', 'd']));
+      await n;
+      final r = m.refresh('q');
+      m.upsertItem('q', it('z')); // at the head, replayed
+      s.completeLast(items(['a', 'b']), next: 2);
+      await pump();
+      s.completeLast(items(['c', 'd']));
+      expect(ids(await r.bounded), ['z', 'a', 'b', 'c', 'd']);
+      await sub.cancel();
+      expect(ids(m.peek('q')), ['z', 'a', 'b']);
+      expect(m.peek('q')!.next.hasMore, isTrue);
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {
