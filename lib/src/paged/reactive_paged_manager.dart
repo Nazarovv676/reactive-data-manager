@@ -1,25 +1,37 @@
 import 'dart:async';
 
 import 'package:reactive_data_manager/src/paged/paged_types.dart';
+import 'package:reactive_data_manager/src/storage.dart';
 import 'package:rxdart/rxdart.dart';
 
-enum _EditKind { patch, remove, upsert }
+enum _EditKind { patch, remove, upsert, insertAt }
 
 class _Edit<T> {
   _Edit.patch(this.seq, this.id, this.transform)
       : kind = _EditKind.patch,
         item = null,
+        afterId = null,
+        index = 0,
         atHead = true,
         move = false;
   _Edit.remove(this.seq, this.id)
       : kind = _EditKind.remove,
         transform = null,
         item = null,
+        afterId = null,
+        index = 0,
         atHead = true,
         move = false;
   _Edit.upsert(this.seq, this.id, T this.item, this.atHead, this.move)
       : kind = _EditKind.upsert,
-        transform = null;
+        transform = null,
+        afterId = null,
+        index = 0;
+  _Edit.insertAt(this.seq, this.id, T this.item, this.afterId, this.index)
+      : kind = _EditKind.insertAt,
+        transform = null,
+        atHead = true,
+        move = false;
 
   final _EditKind kind;
   final int seq;
@@ -28,16 +40,28 @@ class _Edit<T> {
   final T? item;
   final bool atHead;
   final bool move;
+  final Object? afterId;
+  final int index;
+}
+
+/// One loaded page inside an entry: how many items it owns in the list and the
+/// cursors the server returned for it.
+class _Page<C extends Object> {
+  _Page(this.count, this.previous, this.next);
+  int count;
+  C? previous;
+  C? next;
 }
 
 /// One in-flight load of one lane (head, next or previous).
 class _Op<T, C extends Object> {
-  _Op(this.startSeq, [this.anchor]);
+  _Op(this.startSeq, [this.anchor, this.mode = RefreshMode.firstPage]);
 
   final Completer<PagedState<T>> _completer = Completer<PagedState<T>>();
   final AbortController abort = AbortController();
   final int startSeq;
   final C? anchor;
+  final RefreshMode mode;
   bool discarded = false;
 
   Future<PagedState<T>> get future => _completer.future;
@@ -71,9 +95,12 @@ class _Entry<T, C extends Object> {
   PagedError? nextError;
   PagedError? prevError;
 
-  // First-page snapshot, for Retention.firstPage.
-  int headCount = 0;
-  C? headNext;
+  /// Loaded pages in list order. Their counts add up to `items.length`.
+  List<_Page<C>> pages = [];
+
+  /// Restored from storage and not revalidated by the network yet.
+  bool hydrated = false;
+  int hydrationToken = 0;
 
   _Op<T, C>? head;
   _Op<T, C>? next;
@@ -87,6 +114,38 @@ class _Entry<T, C extends Object> {
   Timer? evictTimer;
 
   bool get hasInFlight => head != null || next != null || prev != null;
+}
+
+/// Optimistic edits handed to the `optimistic` callback of
+/// [ReactivePagedManager.mutate]. They behave like the manager's own
+/// `patchItem`/`removeItem`/`upsertItem`, and are undone if the action fails.
+class PagedEdits<Q, T> {
+  PagedEdits._(this._patch, this._remove, this._upsert);
+
+  final void Function(Object, T Function(T), bool Function(Q)?) _patch;
+  final void Function(Object, bool Function(Q)?) _remove;
+  final void Function(Q, T, PagedEnd, bool) _upsert;
+
+  /// See [ReactivePagedManager.patchItem].
+  void patchItem(
+    Object id,
+    T Function(T current) transform, {
+    bool Function(Q query)? where,
+  }) =>
+      _patch(id, transform, where);
+
+  /// See [ReactivePagedManager.removeItem].
+  void removeItem(Object id, {bool Function(Q query)? where}) =>
+      _remove(id, where);
+
+  /// See [ReactivePagedManager.upsertItem].
+  void upsertItem(
+    Q query,
+    T item, {
+    PagedEnd at = PagedEnd.head,
+    bool move = false,
+  }) =>
+      _upsert(query, item, at, move);
 }
 
 /// A manager for paginated lists: one accumulated list per query, with
@@ -124,8 +183,22 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// - [evictAfterUnwatched]: evicts a query that had no listener for this long.
   /// - [retainWhenUnwatched]: [Retention.firstPage] trims a query to its first
   ///   page when the last listener leaves.
+  /// - [refreshMode]: default for [refresh], the stale refetch of `watch` and
+  ///   the refetch of a watched query on [invalidate].
+  /// - [maxRefreshPages]: cap for [RefreshMode.allPages].
+  /// - [maxItems]: windowing. When a load pushes the list over this size, whole
+  ///   pages are dropped from the opposite end and that end's cursor is
+  ///   restored, so they can be loaded again. Nothing is trimmed when the
+  ///   boundary cursor is unknown. Do not combine with `req.loadedCount`
+  ///   offsets (trimmed items are no longer counted); use `req.cursor`.
   /// - [maxUnproductivePages]: how many pages that add nothing new one
   ///   `loadNext`/`loadPrevious` follows before the edge counts as exhausted.
+  /// - [storage], [persistWhen], [storageVersion]: optional persistence of the
+  ///   first page of each query (items and total, never cursors). A restored
+  ///   query is emitted first, marked stale, and revalidated; `loadNext` on it
+  ///   refreshes the first page before paging. `evict`/`clearCache` delete the
+  ///   persisted entries; LRU/timer eviction only drops memory. Storage errors
+  ///   never fail a load.
   /// - [onError]: notified of every fetch failure (also exposed in the state).
   /// - [clock]: injectable time source.
   ReactivePagedManager({
@@ -135,7 +208,13 @@ class ReactivePagedManager<Q, T, C extends Object> {
     this.maxEntries,
     this.evictAfterUnwatched,
     this.retainWhenUnwatched = Retention.all,
+    this.refreshMode = RefreshMode.firstPage,
+    this.maxRefreshPages = 10,
+    this.maxItems,
     this.maxUnproductivePages = 3,
+    this.storage,
+    this.persistWhen,
+    this.storageVersion = 0,
     this.onError,
     this.clock = DateTime.now,
   });
@@ -158,8 +237,26 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// What is kept for unwatched queries.
   final Retention retainWhenUnwatched;
 
+  /// Default refresh mode.
+  final RefreshMode refreshMode;
+
+  /// Cap for [RefreshMode.allPages].
+  final int maxRefreshPages;
+
+  /// Windowing limit.
+  final int? maxItems;
+
   /// Pages that add nothing new followed per call.
   final int maxUnproductivePages;
+
+  /// Optional persistence layer.
+  final ReactiveStorage<Q, PagedSnapshot<T>>? storage;
+
+  /// Which queries are persisted (default: all, when [storage] is set).
+  final bool Function(Q query)? persistWhen;
+
+  /// Entries persisted with a different version are ignored and deleted.
+  final int storageVersion;
 
   /// Failure callback.
   final void Function(
@@ -175,6 +272,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
   final Map<Q, _Entry<T, C>> _entries = {};
   int _tick = 0;
   bool _disposed = false;
+  Future<void> _storageTail = Future<void>.value();
 
   // --- reading -------------------------------------------------------------
 
@@ -233,23 +331,27 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   /// Loads the page after the tail. Joins an in-flight `loadNext`, and joins a
   /// running head load instead of appending to a list being replaced. Starts
-  /// the first load when nothing is loaded; a no-op without more pages.
+  /// the first load when nothing is loaded (or only a restored snapshot is);
+  /// a no-op without more pages.
   Future<PagedState<T>> loadNext(Q query) => _loadEdge(query, forward: true);
 
   /// Loads the page before the head. Same rules as [loadNext].
   Future<PagedState<T>> loadPrevious(Q query) =>
       _loadEdge(query, forward: false);
 
-  /// Refetches the first page, keeping the previous items visible
-  /// (`isRefreshing`). On failure the previous items stay and the error is in
-  /// the state. Joins a running refresh; a different [anchor] supersedes it.
-  /// Aborts running `loadNext`/`loadPrevious`.
-  Future<PagedState<T>> refresh(Q query, {C? anchor}) {
+  /// Refetches the head, keeping the previous items visible (`isRefreshing`).
+  /// On failure the previous items stay and the error is in the state. Joins a
+  /// running refresh; a different [anchor] or [mode] supersedes it. Aborts
+  /// running `loadNext`/`loadPrevious`. See [RefreshMode].
+  Future<PagedState<T>> refresh(Q query, {C? anchor, RefreshMode? mode}) {
     if (_disposed) return Future.value(const PagedState());
     final e = _entryFor(query);
+    final wanted = mode ?? refreshMode;
     final running = e.head;
-    if (running != null && running.anchor == anchor) return running.future;
-    return _startHead(e, query, anchor: anchor).future;
+    if (running != null && running.anchor == anchor && running.mode == wanted) {
+      return running.future;
+    }
+    return _startHead(e, query, anchor: anchor, mode: wanted).future;
   }
 
   Future<PagedState<T>> _loadEdge(Q query, {required bool forward}) {
@@ -257,7 +359,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     final e = _entryFor(query);
     final head = e.head;
     if (head != null) return head.future;
-    if (!e.hasLoaded) return _startHead(e, query).future;
+    if (!e.hasLoaded || e.hydrated) return _startHead(e, query).future;
     final lane = forward ? e.next : e.prev;
     if (lane != null) return lane.future;
     if (!(forward ? e.nextMore : e.prevMore)) {
@@ -276,8 +378,13 @@ class ReactivePagedManager<Q, T, C extends Object> {
     return op.future;
   }
 
-  _Op<T, C> _startHead(_Entry<T, C> e, Q query, {C? anchor}) {
-    final op = _Op<T, C>(e.seq, anchor);
+  _Op<T, C> _startHead(
+    _Entry<T, C> e,
+    Q query, {
+    C? anchor,
+    RefreshMode? mode,
+  }) {
+    final op = _Op<T, C>(e.seq, anchor, mode ?? refreshMode);
     for (final old in [e.head, e.next, e.prev]) {
       old?.discard(op.future);
     }
@@ -291,15 +398,37 @@ class ReactivePagedManager<Q, T, C extends Object> {
   }
 
   Future<void> _runHead(_Entry<T, C> e, Q query, _Op<T, C> op) async {
-    PageResult<T, C> result;
+    final results = <PageResult<T, C>>[];
     try {
-      result = await fetchPage(PageRequest<Q, C>(
+      results.add(await fetchPage(PageRequest<Q, C>(
         query: query,
         direction: PageDirection.initial,
         cursor: op.anchor,
         loadedCount: e.items.length,
         signal: op.abort.signal,
-      ));
+      )));
+      if (op.discarded) return;
+      if (op.mode == RefreshMode.allPages && e.hasLoaded && !e.hydrated) {
+        final wanted =
+            e.pages.length < maxRefreshPages ? e.pages.length : maxRefreshPages;
+        var loaded = results.first.items.length;
+        while (results.length < wanted && results.last.next != null) {
+          try {
+            final more = await fetchPage(PageRequest<Q, C>(
+              query: query,
+              direction: PageDirection.next,
+              cursor: results.last.next,
+              loadedCount: loaded,
+              signal: op.abort.signal,
+            ));
+            if (op.discarded) return;
+            loaded += more.items.length;
+            results.add(more);
+          } on PageCursorExpiredException {
+            break; // keep what we have
+          }
+        }
+      }
     } catch (error, stack) {
       if (op.discarded) return;
       e.head = null;
@@ -312,28 +441,112 @@ class ReactivePagedManager<Q, T, C extends Object> {
     }
     if (op.discarded) return;
 
-    var list = _dedupe(result.items);
-    for (final edit in e.edits.where((x) => x.seq > op.startSeq)) {
-      _applyEdit(list, edit);
-    }
-    e.items = list;
-    e.nextCursor = result.next;
-    e.nextMore = result.next != null;
-    e.prevCursor = result.previous;
-    e.prevMore = result.previous != null;
-    e.totalCount = result.totalCount;
+    _applyHead(e, op, results);
+    e.totalCount = results.last.totalCount ?? results.first.totalCount;
     e.fetchedAt = clock();
     e.stale = false;
     e.hasLoaded = true;
+    e.hydrated = false;
     e.refreshError = null;
     e.nextError = null;
     e.prevError = null;
-    e.headCount = list.length;
-    e.headNext = result.next;
     e.head = null;
     _finishOp(e);
+    _persist(query, e);
     _emit(e);
     op.resolve(_stateOf(e));
+  }
+
+  /// Replaces (or splices into) the entry's list with a fresh head load.
+  void _applyHead(
+    _Entry<T, C> e,
+    _Op<T, C> op,
+    List<PageResult<T, C>> results,
+  ) {
+    final first = results.first;
+    final replay = e.edits.where((x) => x.seq > op.startSeq).toList();
+
+    if (op.mode == RefreshMode.mergeHead &&
+        e.hasLoaded &&
+        !e.hydrated &&
+        results.length == 1) {
+      final fresh = _dedupe(first.items);
+      final lastId = fresh.isEmpty ? null : idOf(fresh.last);
+      final at =
+          lastId == null ? -1 : e.items.indexWhere((x) => idOf(x) == lastId);
+      if (at >= 0) {
+        for (final edit in replay) {
+          _applyEdit(fresh, edit);
+        }
+        final freshCount = fresh.length;
+        final rest = _dropFront(e.pages, at + 1);
+        if (rest.isNotEmpty) rest.first.previous = null; // boundary unknown
+        final pages = <_Page<C>>[
+          _Page<C>(
+            freshCount,
+            first.previous,
+            rest.isEmpty ? e.nextCursor : null,
+          ),
+          ...rest,
+        ];
+        e.items = _dedupe([...fresh, ...e.items.sublist(at + 1)]);
+        e.pages = pages;
+        e.prevCursor = first.previous;
+        e.prevMore = first.previous != null;
+        _normalizePages(e);
+        return;
+      }
+    }
+
+    final seen = <Object>{};
+    final list = <T>[];
+    final pages = <_Page<C>>[];
+    for (final r in results) {
+      var count = 0;
+      for (final item in r.items) {
+        final id = idOf(item);
+        if (id == null || seen.add(id)) {
+          list.add(item);
+          count++;
+        }
+      }
+      pages.add(_Page<C>(count, r.previous, r.next));
+    }
+    for (final edit in replay) {
+      _applyEdit(list, edit);
+    }
+    e.items = list;
+    e.pages = pages;
+    e.nextCursor = results.last.next;
+    e.nextMore = results.last.next != null;
+    e.prevCursor = first.previous;
+    e.prevMore = first.previous != null;
+    _normalizePages(e);
+  }
+
+  /// Copies [pages] without their first [n] items.
+  List<_Page<C>> _dropFront(List<_Page<C>> pages, int n) {
+    var left = n;
+    final out = <_Page<C>>[];
+    for (final page in pages) {
+      if (left >= page.count) {
+        left -= page.count;
+        continue;
+      }
+      out.add(_Page<C>(page.count - left, page.previous, page.next));
+      left = 0;
+    }
+    return out;
+  }
+
+  /// Keeps the page counts consistent with the list. When local edits or
+  /// dedupe made them drift, the pages collapse into one (no windowing
+  /// granularity, cursors are kept).
+  void _normalizePages(_Entry<T, C> e) {
+    final sum = e.pages.fold<int>(0, (a, p) => a + p.count);
+    if (sum != e.items.length || e.pages.isEmpty) {
+      e.pages = [_Page<C>(e.items.length, e.prevCursor, e.nextCursor)];
+    }
   }
 
   Future<void> _runEdge(
@@ -387,6 +600,17 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
       final added = _mergeEdge(e, result.items, forward, op.startSeq);
       final following = forward ? result.next : result.previous;
+      if (added > 0) {
+        final page = _Page<C>(added, result.previous, result.next);
+        forward ? e.pages.add(page) : e.pages.insert(0, page);
+      } else if (e.pages.isNotEmpty) {
+        // Nothing new: only the cursor moved on.
+        if (forward) {
+          e.pages.last.next = following;
+        } else {
+          e.pages.first.previous = following;
+        }
+      }
       if (forward) {
         e.nextCursor = following;
         e.nextMore = following != null;
@@ -417,10 +641,36 @@ class ReactivePagedManager<Q, T, C extends Object> {
       break;
     }
 
+    _normalizePages(e);
+    _window(e, forward);
     clearLane();
     _finishOp(e);
     _emit(e);
     op.resolve(_stateOf(e));
+  }
+
+  /// Drops whole pages from the end opposite to the last load while the list
+  /// is over [maxItems]. Only when the boundary cursor is known.
+  void _window(_Entry<T, C> e, bool forward) {
+    final limit = maxItems;
+    if (limit == null) return;
+    while (e.items.length > limit && e.pages.length > 1) {
+      if (forward) {
+        final boundary = e.pages[1].previous;
+        if (boundary == null) return;
+        final dropped = e.pages.removeAt(0);
+        e.items.removeRange(0, dropped.count);
+        e.prevCursor = boundary;
+        e.prevMore = true;
+      } else {
+        final boundary = e.pages[e.pages.length - 2].next;
+        if (boundary == null) return;
+        final dropped = e.pages.removeLast();
+        e.items.removeRange(e.items.length - dropped.count, e.items.length);
+        e.nextCursor = boundary;
+        e.nextMore = true;
+      }
+    }
   }
 
   // --- merging and edits ---------------------------------------------------
@@ -441,7 +691,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
     final later = e.edits.where((x) => x.seq > startSeq).toList();
     // Rebase onto local edits made after the request started.
     for (final edit in later) {
-      if (edit.kind != _EditKind.upsert) _applyEdit(fresh, edit);
+      if (edit.kind == _EditKind.patch || edit.kind == _EditKind.remove) {
+        _applyEdit(fresh, edit);
+      }
     }
     final index = <Object, int>{};
     for (var i = 0; i < e.items.length; i++) {
@@ -462,8 +714,19 @@ class ReactivePagedManager<Q, T, C extends Object> {
     return added.length;
   }
 
-  /// Applies [edit] to [list]. Returns whether anything changed.
-  bool _applyEdit(List<T> list, _Edit<T> edit) {
+  /// Applies [edit] to [list]. With [track], the entry's page counts follow.
+  /// Returns whether anything changed.
+  bool _applyEdit(List<T> list, _Edit<T> edit, [_Entry<T, C>? track]) {
+    void removeAt(int i) {
+      list.removeAt(i);
+      if (track != null) _trackRemove(track, i);
+    }
+
+    void insertAt(int i, T item) {
+      list.insert(i, item);
+      if (track != null) _trackInsert(track, i);
+    }
+
     switch (edit.kind) {
       case _EditKind.patch:
         var changed = false;
@@ -475,25 +738,64 @@ class ReactivePagedManager<Q, T, C extends Object> {
         }
         return changed;
       case _EditKind.remove:
-        final before = list.length;
-        list.removeWhere((x) => idOf(x) == edit.id);
-        return list.length != before;
+        var changed = false;
+        for (var i = list.length - 1; i >= 0; i--) {
+          if (idOf(list[i]) == edit.id) {
+            removeAt(i);
+            changed = true;
+          }
+        }
+        return changed;
       case _EditKind.upsert:
         final item = edit.item as T;
         final at =
             edit.id == null ? -1 : list.indexWhere((x) => idOf(x) == edit.id);
         if (at >= 0) {
-          if (edit.move) {
-            list.removeAt(at);
-            edit.atHead ? list.insert(0, item) : list.add(item);
-          } else {
+          if (!edit.move) {
             list[at] = item;
+            return true;
           }
-        } else {
-          edit.atHead ? list.insert(0, item) : list.add(item);
+          removeAt(at);
         }
+        insertAt(edit.atHead ? 0 : list.length, item);
+        return true;
+      case _EditKind.insertAt:
+        final item = edit.item as T;
+        if (edit.id != null && list.any((x) => idOf(x) == edit.id)) {
+          return false; // already back
+        }
+        var at = edit.index;
+        if (edit.afterId != null) {
+          final after = list.indexWhere((x) => idOf(x) == edit.afterId);
+          if (after >= 0) at = after + 1;
+        }
+        insertAt(at.clamp(0, list.length), item);
         return true;
     }
+  }
+
+  void _trackRemove(_Entry<T, C> e, int index) {
+    var start = 0;
+    for (final page in e.pages) {
+      if (index < start + page.count) {
+        page.count--;
+        return;
+      }
+      start += page.count;
+    }
+  }
+
+  void _trackInsert(_Entry<T, C> e, int index) {
+    if (e.pages.isEmpty) return;
+    var start = 0;
+    for (final page in e.pages) {
+      if (index < start + page.count) {
+        page.count++;
+        return;
+      }
+      start += page.count;
+    }
+    e.pages.last.count++;
   }
 
   void _record(_Entry<T, C> e, _Edit<T> edit) {
@@ -526,7 +828,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
       if (where != null && !where(entry.key)) continue;
       final e = entry.value;
       final edit = _Edit<T>.patch(++e.seq, id, transform);
-      final changed = _applyEdit(e.items, edit);
+      final changed = _applyEdit(e.items, edit, e);
       _record(e, edit); // also when nothing changed: a response may need it
       if (changed) _emit(e);
     }
@@ -539,7 +841,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
       if (where != null && !where(entry.key)) continue;
       final e = entry.value;
       final edit = _Edit<T>.remove(++e.seq, id);
-      final changed = _applyEdit(e.items, edit);
+      final changed = _applyEdit(e.items, edit, e);
       if (changed) {
         final total = e.totalCount;
         if (total != null && total > 0) e.totalCount = total - 1;
@@ -573,13 +875,147 @@ class ReactivePagedManager<Q, T, C extends Object> {
       if (!endLoaded) return;
     }
     final edit = _Edit<T>.upsert(++e.seq, id, item, at == PagedEnd.head, move);
-    _applyEdit(e.items, edit);
+    _applyEdit(e.items, edit, e);
     if (!present) {
       final total = e.totalCount;
       if (total != null) e.totalCount = total + 1;
     }
     _record(e, edit);
     _emit(e);
+  }
+
+  // --- optimistic mutation -------------------------------------------------
+
+  /// Runs [action] with optimistic edits.
+  ///
+  /// [optimistic] applies edits through [PagedEdits] immediately. If [action]
+  /// fails, they are undone (a patch is restored only when the item is still
+  /// the one that was written; a removed item is re-inserted after its former
+  /// predecessor; an inserted item is removed) and the error is rethrown.
+  /// Whatever the outcome, every touched query is invalidated (a watched one
+  /// refetches), and so is every query matching [invalidateAfter] — a failed
+  /// mutation may have been partly applied.
+  ///
+  /// Unlike the loading methods this one rethrows: it is a mutation, not a
+  /// load. An `upsertItem` whose `move` relocated an item is undone by value,
+  /// not by position.
+  Future<R> mutate<R>(
+    Future<R> Function() action, {
+    void Function(PagedEdits<Q, T> edits)? optimistic,
+    bool Function(Q query)? invalidateAfter,
+  }) async {
+    final undo = <void Function()>[];
+    final touched = <Q>{};
+    final edits = PagedEdits<Q, T>._(
+      (id, f, where) => _patchRecorded(id, f, where, undo, touched),
+      (id, where) => _removeRecorded(id, where, undo, touched),
+      (q, item, at, move) => _upsertRecorded(q, item, at, move, undo, touched),
+    );
+    try {
+      optimistic?.call(edits);
+      return await action();
+    } catch (_) {
+      for (final step in undo.reversed) {
+        step();
+      }
+      rethrow;
+    } finally {
+      for (final q in touched) {
+        invalidate(q);
+      }
+      if (invalidateAfter != null) invalidateWhere(invalidateAfter);
+    }
+  }
+
+  void _patchRecorded(
+    Object id,
+    T Function(T) transform,
+    bool Function(Q)? where,
+    List<void Function()> undo,
+    Set<Q> touched,
+  ) {
+    for (final key in _entries.keys.toList()) {
+      if (where != null && !where(key)) continue;
+      final pairs = <(T, T)>[];
+      var recording = true;
+      patchItem(id, (current) {
+        final next = transform(current);
+        if (recording) pairs.add((current, next));
+        return next;
+      }, where: (q) => q == key);
+      recording = false;
+      if (pairs.isEmpty) continue;
+      touched.add(key);
+      undo.add(() {
+        for (final (old, written) in pairs) {
+          patchItem(id, (cur) => cur == written ? old : cur,
+              where: (q) => q == key);
+        }
+      });
+    }
+  }
+
+  void _removeRecorded(
+    Object id,
+    bool Function(Q)? where,
+    List<void Function()> undo,
+    Set<Q> touched,
+  ) {
+    for (final entry in _entries.entries.toList()) {
+      final key = entry.key;
+      if (where != null && !where(key)) continue;
+      final items = entry.value.items;
+      final at = items.indexWhere((x) => idOf(x) == id);
+      if (at < 0) continue;
+      final item = items[at];
+      final afterId = at > 0 ? idOf(items[at - 1]) : null;
+      removeItem(id, where: (q) => q == key);
+      touched.add(key);
+      undo.add(() => _insertAt(key, item, afterId, at));
+    }
+  }
+
+  void _upsertRecorded(
+    Q query,
+    T item,
+    PagedEnd at,
+    bool move,
+    List<void Function()> undo,
+    Set<Q> touched,
+  ) {
+    final e = _entries[query];
+    if (e == null) return;
+    final id = idOf(item);
+    final before = id == null ? -1 : e.items.indexWhere((x) => idOf(x) == id);
+    final old = before >= 0 ? e.items[before] : null;
+    final length = e.items.length;
+    upsertItem(query, item, at: at, move: move);
+    if (id == null) return; // no identity: cannot be undone
+    if (before >= 0) {
+      touched.add(query);
+      undo.add(() => patchItem(id, (cur) => cur == item ? old as T : cur,
+          where: (q) => q == query));
+    } else if (e.items.length > length) {
+      touched.add(query);
+      undo.add(() {
+        final current = _entries[query]?.items;
+        if (current != null && current.any((x) => idOf(x) == id && x == item)) {
+          removeItem(id, where: (q) => q == query);
+        }
+      });
+    }
+  }
+
+  void _insertAt(Q query, T item, Object? afterId, int index) {
+    final e = _entries[query];
+    if (e == null) return;
+    final edit = _Edit<T>.insertAt(++e.seq, idOf(item), item, afterId, index);
+    if (_applyEdit(e.items, edit, e)) {
+      final total = e.totalCount;
+      if (total != null) e.totalCount = total + 1;
+      _record(e, edit);
+      _emit(e);
+    }
   }
 
   // --- invalidation --------------------------------------------------------
@@ -629,33 +1065,37 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   // --- lifecycle -----------------------------------------------------------
 
-  /// Resets [query]: in-flight loads are discarded, the cache is dropped.
-  /// Listeners stay subscribed and receive an empty idle state; nothing is
-  /// refetched automatically.
+  /// Resets [query]: in-flight loads are discarded, the cache and the
+  /// persisted entry are dropped. Listeners stay subscribed and receive an
+  /// empty idle state; nothing is refetched automatically.
   void evict(Q query) {
     final e = _entries[query];
     if (e != null) _reset(query, e);
+    _enqueueStorage((s) => s.delete(query));
   }
 
-  /// [evict] for every query (e.g. on logout).
+  /// [evict] for every query (e.g. on logout), including persisted entries.
   void clearCache() {
     for (final entry in _entries.entries.toList()) {
       _reset(entry.key, entry.value);
     }
+    _enqueueStorage((s) => s.clear());
   }
 
   void _reset(Q query, _Entry<T, C> e) {
     final ops = [e.head, e.next, e.prev];
     e.head = e.next = e.prev = null;
     e.items = [];
+    e.pages = [];
     e.hasLoaded = false;
-    e.nextCursor = e.prevCursor = e.headNext = null;
+    e.hydrated = false;
+    e.hydrationToken = ++_tick;
+    e.nextCursor = e.prevCursor = null;
     e.nextMore = e.prevMore = false;
     e.totalCount = null;
     e.fetchedAt = null;
     e.stale = false;
     e.refreshError = e.nextError = e.prevError = null;
-    e.headCount = 0;
     e.edits.clear();
     final state = _stateOf(e);
     for (final op in ops) {
@@ -693,6 +1133,70 @@ class ReactivePagedManager<Q, T, C extends Object> {
     _entries.clear();
   }
 
+  // --- persistence ---------------------------------------------------------
+
+  /// Storage operations run one after another, errors never escape.
+  void _enqueueStorage(
+    Future<void> Function(ReactiveStorage<Q, PagedSnapshot<T>> s) op,
+  ) {
+    final s = storage;
+    if (s == null) return;
+    _storageTail = _storageTail.then((_) async {
+      try {
+        await op(s);
+      } catch (_) {}
+    });
+  }
+
+  bool _persists(Q query) =>
+      storage != null && (persistWhen?.call(query) ?? true);
+
+  void _persist(Q query, _Entry<T, C> e) {
+    if (!_persists(query)) return;
+    final count = e.pages.isEmpty ? e.items.length : e.pages.first.count;
+    final snapshot = PagedSnapshot<T>(
+      List<T>.of(e.items.take(count)),
+      totalCount: e.totalCount,
+    );
+    final at = e.fetchedAt!;
+    _enqueueStorage((s) => s.write(
+          query,
+          StoredEntry<PagedSnapshot<T>>(snapshot, at, version: storageVersion),
+        ));
+  }
+
+  Future<void> _hydrate(Q query, _Entry<T, C> e) async {
+    final s = storage;
+    if (s == null || !_persists(query)) return;
+    final token = e.hydrationToken = ++_tick;
+    StoredEntry<PagedSnapshot<T>>? stored;
+    try {
+      stored = await s.read(query);
+    } catch (_) {
+      stored = null;
+    }
+    if (stored == null) return;
+    // Evicted, reset or disposed while reading: drop the result.
+    if (_disposed ||
+        !identical(_entries[query], e) ||
+        e.hydrationToken != token) {
+      return;
+    }
+    if (stored.version != storageVersion) {
+      _enqueueStorage((s) => s.delete(query));
+      return;
+    }
+    if (e.hasLoaded) return; // the network was faster
+    final list = List<T>.of(stored.value.items);
+    e.items = list;
+    e.pages = [_Page<C>(list.length, null, null)];
+    e.hasLoaded = true;
+    e.hydrated = true;
+    e.fetchedAt = stored.fetchedAt;
+    e.totalCount = stored.value.totalCount;
+    _emit(e);
+  }
+
   // --- internals -----------------------------------------------------------
 
   _Entry<T, C> _entryFor(Q query) {
@@ -701,6 +1205,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     final e = _Entry<T, C>(BehaviorSubject<PagedState<T>>());
     _entries[query] = e;
     e.subject.add(_stateOf(e));
+    _hydrate(query, e);
     // Created by a call, not a watch: it counts as unwatched from now on.
     _unwatched(query, e);
     return e;
@@ -708,25 +1213,26 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   void _unwatched(Q query, _Entry<T, C> e) {
     e.lastUnwatched = ++_tick;
-    if (retainWhenUnwatched == Retention.firstPage && e.hasLoaded) {
-      final keep = e.headCount < e.items.length ? e.headCount : e.items.length;
-      if (keep < e.items.length || e.nextCursor != e.headNext) {
-        for (final op in [e.next, e.prev]) {
-          op?.discard(_stateAfterDiscard(e));
-        }
-        e.next = e.prev = null;
-        e.items = e.items.sublist(0, keep);
-        e.nextCursor = e.headNext;
-        e.nextMore = e.headNext != null;
-        _emit(e);
+    if (retainWhenUnwatched == Retention.firstPage &&
+        e.hasLoaded &&
+        e.pages.length > 1) {
+      final first = e.pages.first;
+      for (final op in [e.next, e.prev]) {
+        op?.discard(_stateAfterDiscard(e));
       }
+      e.next = e.prev = null;
+      e.items = e.items.sublist(0, first.count);
+      e.pages = [first];
+      e.nextCursor = first.next;
+      e.nextMore = first.next != null;
+      _emit(e);
     }
     e.evictTimer?.cancel();
     final after = evictAfterUnwatched;
     if (after != null) {
       e.evictTimer = Timer(after, () {
         if (e.watchers == 0 && identical(_entries[query], e)) {
-          _reset(query, e);
+          _reset(query, e); // memory only: persisted entries are kept
         }
       });
     }
@@ -748,7 +1254,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
   }
 
   bool _isStale(_Entry<T, C> e) {
-    if (e.stale) return true;
+    if (e.stale || e.hydrated) return true;
     final limit = maxAge;
     final at = e.fetchedAt;
     return limit != null && at != null && clock().difference(at) >= limit;

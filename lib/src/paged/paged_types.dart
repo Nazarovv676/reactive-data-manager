@@ -208,3 +208,33 @@ enum Retention {
   /// Only the first page (trimmed when the last listener leaves).
   firstPage,
 }
+
+/// How `refresh` rebuilds the list.
+enum RefreshMode {
+  /// Replaces the whole window with the freshly fetched first page.
+  firstPage,
+
+  /// Re-fetches as many pages as are loaded (capped by `maxRefreshPages`),
+  /// following the *new* cursors, then swaps atomically. Any failure keeps the
+  /// old window and reports the error.
+  allPages,
+
+  /// For feeds: fetches the head page and splices it in front of the items
+  /// that are already loaded, keeping the tail cursor. When the new page does
+  /// not overlap with the loaded items there is a gap, so it behaves like
+  /// [firstPage].
+  mergeHead,
+}
+
+/// What is persisted for a query: the first page's items and the server total.
+/// Cursors are never persisted (they may expire).
+final class PagedSnapshot<T> {
+  /// Creates a snapshot.
+  const PagedSnapshot(this.items, {this.totalCount});
+
+  /// The persisted items.
+  final List<T> items;
+
+  /// The last known server total.
+  final int? totalCount;
+}

@@ -12,7 +12,11 @@
   - `patchItem`/`removeItem` across every cached query, `upsertItem` (head/tail, `move`).
   - `invalidate`/`invalidateWhere`/`invalidateAll` (a watched query refetches), `evict`, `clearCache`, `dispose`.
   - Eviction: `maxEntries` (LRU over unwatched queries), `evictAfterUnwatched`, `Retention.firstPage`; `maxAge`, `onError`, injectable `clock`.
-- Not included yet (from the design in the issue): refresh modes `mergeHead`/`allPages`, `maxItems` windowing, optimistic `mutate` with rollback, persistence of paged lists, `testing.dart`.
+  - `RefreshMode.mergeHead` / `allPages`, `refresh(anchor:)`, `maxItems` windowing, `maxRefreshPages`.
+  - `mutate` with optimistic `PagedEdits` and rollback, `invalidateAfter`.
+  - Persistence of the first page (`storage`, `persistWhen`, `storageVersion`, `PagedSnapshot`): stored page emitted first, revalidated; `evict`/`clearCache` delete it.
+- `package:reactive_data_manager/testing.dart` with `ScriptedPageFetcher`.
+- `ReactiveDataManager.invalidateWhere` and `patchWhere`.
 
 ## 1.2.0 (2026-10-12)
 

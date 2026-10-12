@@ -399,6 +399,27 @@ class ReactiveDataManager<K, T> {
     _activeFetches.remove(key)?.discard();
   }
 
+  /// [invalidate] for every cached key matching [test].
+  void invalidateWhere(bool Function(K key) test) {
+    for (final key in _cache.keys.toList()) {
+      if (test(key)) invalidate(key);
+    }
+  }
+
+  /// Replaces cached values across keys. For every cached key, [transform]
+  /// returns the new value, or `null` to leave it alone. Like [patch] it
+  /// discards an in-flight fetch of a changed key and keeps its invalidated
+  /// state. Useful for per-page caches where one item lives under several keys.
+  void patchWhere(T? Function(K key, T value) transform) {
+    for (final key in _cache.keys.toList()) {
+      final next = transform(key, _cache[key] as T);
+      if (next == null) continue;
+      final wasStale = _stale.contains(key);
+      _activeFetches.remove(key)?.discard();
+      _write(key, next, markFresh: !wasStale);
+    }
+  }
+
   /// [invalidate] for every key.
   void invalidateAll() {
     _invalidatedAllAt = clock();

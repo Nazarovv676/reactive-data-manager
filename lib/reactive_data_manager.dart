@@ -21,5 +21,8 @@ export 'src/paged/paged_types.dart'
         PagedEdge,
         PagedState,
         PagedEnd,
+        PagedSnapshot,
+        RefreshMode,
         Retention;
-export 'src/paged/reactive_paged_manager.dart' show ReactivePagedManager;
+export 'src/paged/reactive_paged_manager.dart'
+    show ReactivePagedManager, PagedEdits;

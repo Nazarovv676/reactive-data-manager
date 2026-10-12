@@ -162,6 +162,12 @@ ReactiveDataManager<int, User>.cancellable(
 );
 ```
 
+### Cross-key operations
+
+`invalidateWhere((key) => ...)` and `patchWhere((key, value) => newValueOrNull)`
+act on every cached key, e.g. for per-page caches where one item lives under
+several keys.
+
 ### Keyless values
 
 `ReactiveValue<T>` has the same API without a key parameter:
@@ -278,6 +284,12 @@ await events.refresh(query);     // first page; previous items stay visible
 events.patchItem(id, (e) => e.copyWith(liked: true)); // in EVERY cached query
 events.removeItem(id);
 events.upsertItem(query, event); // e.g. a socket message (head/tail, move: true)
+events.loadPrevious(query);      // bidirectional feeds (chat history, jump-to)
+events.refresh(query, mode: RefreshMode.mergeHead); // see "Refresh modes"
+await events.mutate(                 // optimistic edits with rollback
+    () => api.like(id),
+    optimistic: (e) => e.patchItem(id, (x) => x.copyWith(liked: true)),
+);
 events.invalidate(query);        // watched: refetch now; otherwise mark stale
 events.evict(query);
 events.clearCache();             // logout: discards in-flight loads
@@ -313,6 +325,81 @@ Rules worth knowing:
   `retainWhenUnwatched: Retention.firstPage` trims to the first page.
   Watched queries are never evicted; `evict`/`clearCache` reset them in place
   and keep their streams open.
+
+### Refresh modes
+
+`refresh(query, mode: ...)` (or the constructor's `refreshMode`):
+
+- `RefreshMode.firstPage` (default): replaces the whole window with the fresh
+  first page.
+- `RefreshMode.allPages`: re-fetches as many pages as are loaded (capped by
+  `maxRefreshPages`, default 10) along the *new* cursors, then swaps atomically.
+  A failure keeps the old window and sets `refreshError`.
+- `RefreshMode.mergeHead`: for feeds. Fetches the head page and splices it in
+  front of the loaded items, keeping the tail cursor. If the fresh page does not
+  overlap with what is loaded there is a gap, so it behaves like `firstPage`.
+  Typical use: `socket.onReconnect(() => feed.refresh(q, mode: RefreshMode.mergeHead))`.
+
+`refresh(query, anchor: cursor)` loads around an anchor ("jump to"): the cursor
+is passed to the fetcher with `PageDirection.initial`.
+
+### Windowing
+
+`maxItems: 600` keeps long feeds bounded: when a load pushes the list over the
+limit, whole pages are dropped from the opposite end and that end's cursor is
+restored from the retained boundary page, so they can be loaded again with
+`loadPrevious`/`loadNext`. Nothing is trimmed when the boundary cursor is
+unknown. Don't combine it with `req.loadedCount` offsets; use `req.cursor`.
+
+### Optimistic mutations
+
+```dart
+await feed.mutate(
+    () => api.deleteMessage(id),
+    optimistic: (e) => e.removeItem(id),    // also patchItem / upsertItem
+    invalidateAfter: (q) => q.userId == me, // optional extra invalidation
+);
+```
+
+The edits apply immediately. If the action fails they are undone (a patch is
+restored only if the item is still the one that was written, a removed item is
+re-inserted after its former predecessor, an inserted item is removed) and the
+error is rethrown. Whatever the outcome, every touched query is invalidated,
+because a failed mutation may have been partly applied.
+
+### Persistence of lists
+
+```dart
+ReactivePagedManager<EventQuery, Event, int>(
+    ...,
+    storage: myStorage,                 // ReactiveStorage<EventQuery, PagedSnapshot<Event>>
+    persistWhen: (q) => q.isDefault,    // default: every query
+    storageVersion: 1,
+);
+```
+
+The first page (items and total, never cursors) is written after each
+successful head load. On the first use of a query the stored page is emitted
+immediately with its original `fetchedAt`, marked `isStale`, and revalidated;
+`loadNext` on a restored query refreshes the first page before paging. A faster
+network result wins over a slower read. `evict`/`clearCache` delete persisted
+entries (logout); LRU/timer eviction only frees memory. Storage errors never
+fail a load.
+
+### Testing
+
+`package:reactive_data_manager/testing.dart` has `ScriptedPageFetcher`: a
+fetcher whose requests you complete by hand, in any order, with a request log.
+
+```dart
+final pages = ScriptedPageFetcher<String, Item, int>();
+final manager = ReactivePagedManager<String, Item, int>(
+    fetchPage: pages.call, idOf: (i) => i.id);
+
+final f = manager.loadNext('q');
+pages.completeLast([item], next: 2); // or pages.complete(0, ...), pages.fail(0, e)
+await f;
+```
 
 Mapping common servers to the cursor contract: page + `hasNext` ->
 `next: hasNext ? page + 1 : null`; offset -> `next: items.length < limit ?
