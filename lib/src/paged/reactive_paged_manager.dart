@@ -1150,6 +1150,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// persisted entry are dropped. Listeners stay subscribed and receive an
   /// empty idle state; nothing is refetched automatically.
   void evict(Q query) {
+    if (_disposed) return;
     final e = _entries[query];
     if (e != null) _reset(query, e);
     _storage.delete(query);
@@ -1157,6 +1158,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   /// [evict] for every query (e.g. on logout), including persisted entries.
   void clearCache() {
+    if (_disposed) return;
     for (final entry in _entries.snapshot()) {
       _reset(entry.key, entry.value);
     }
@@ -1199,6 +1201,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _storage.close();
     for (final entry in _entries.snapshot()) {
       final e = entry.value;
       final state = _stateOf(e, idle: true);
@@ -1320,8 +1323,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
         isStale: e.hasLoaded && _isStale(e),
       );
 
+  /// Emits the state of [e] unless it equals the last emitted one.
   void _emit(_Entry<T, C> e) {
-    if (!e.subject.isClosed) e.subject.add(_stateOf(e));
+    if (e.subject.isClosed) return;
+    final state = _stateOf(e);
+    if (e.subject.valueOrNull != state) e.subject.add(state);
   }
 
   void _report(Q query, PageDirection d, Object error, StackTrace stack) {

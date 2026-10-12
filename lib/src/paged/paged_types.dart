@@ -77,7 +77,7 @@ final class PageCursorExpiredException implements Exception {
   const PageCursorExpiredException();
 }
 
-/// A failure together with its stack trace.
+/// A failure together with its stack trace. Equal when both are equal.
 final class PagedError {
   /// Creates a paged error.
   const PagedError(this.error, this.stackTrace);
@@ -93,9 +93,18 @@ final class PagedError {
     final e = error;
     return e is E ? e as E : null;
   }
+
+  @override
+  bool operator ==(Object other) =>
+      other is PagedError &&
+      other.error == error &&
+      other.stackTrace == stackTrace;
+
+  @override
+  int get hashCode => Object.hash(error, stackTrace);
 }
 
-/// The state of one end of a list.
+/// The state of one end of a list. Has value equality.
 final class PagedEdge {
   /// Creates an edge state.
   const PagedEdge({this.hasMore = false, this.isLoading = false, this.error});
@@ -108,10 +117,23 @@ final class PagedEdge {
 
   /// Last failure in this direction. Items are retained.
   final PagedError? error;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PagedEdge &&
+      other.hasMore == hasMore &&
+      other.isLoading == isLoading &&
+      other.error == error;
+
+  @override
+  int get hashCode => Object.hash(hasMore, isLoading, error);
 }
 
 /// Immutable snapshot of a paged list: items plus per-operation flags. Errors
 /// live here, next to the retained items; they are never stream errors.
+///
+/// Has value equality, so `distinct()` and widget rebuild checks work; the
+/// manager never emits a state equal to the previous one.
 final class PagedState<T> {
   /// Creates a state.
   const PagedState({
@@ -162,6 +184,43 @@ final class PagedState<T> {
   /// Loaded, empty and nothing more to load.
   bool get isEmpty =>
       hasLoaded && items.isEmpty && !next.hasMore && !previous.hasMore;
+
+  /// Value equality; [items] are compared element by element with `==`.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PagedState<T> &&
+          other.hasLoaded == hasLoaded &&
+          other.isRefreshing == isRefreshing &&
+          other.refreshError == refreshError &&
+          other.next == next &&
+          other.previous == previous &&
+          other.totalCount == totalCount &&
+          other.fetchedAt == fetchedAt &&
+          other.isStale == isStale &&
+          _sameItems(other.items, items);
+
+  @override
+  int get hashCode => Object.hash(
+        Object.hashAll(items),
+        hasLoaded,
+        isRefreshing,
+        refreshError,
+        next,
+        previous,
+        totalCount,
+        fetchedAt,
+        isStale,
+      );
+
+  static bool _sameItems(List<Object?> a, List<Object?> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }
 
 /// Which end of the list an item is inserted at.

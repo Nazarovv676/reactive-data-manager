@@ -337,6 +337,8 @@ Rules worth knowing:
   after the operation (or after the one that superseded them); failures are in
   the state (`refreshError`, `next.error`) and in `onError`. Late subscribers
   get the state, not a replayed error.
+- `PagedState` (and `PagedEdge`, `PagedError`) have value equality; a state
+  equal to the previous one is never emitted.
 - Concurrent `loadNext` calls share one request. `loadNext` during a refresh
   joins it, so a page is never appended to a list that is being replaced.
   `refresh` aborts running `loadNext`/`loadPrevious`.
@@ -471,7 +473,10 @@ cached queries.
 
 ## Cleanup
 
-Don't forget to dispose of the manager when it's no longer needed:
+Don't forget to dispose of the manager when it's no longer needed. After
+`dispose()` storage is never touched again (`evict`/`clearCache` on a disposed
+paged manager do nothing; on a disposed `ReactiveDataManager` they only drop
+memory):
 
 ```dart
 @override

@@ -634,6 +634,20 @@ void main() {
       expect(await restored.getData(), 2); // read back under its own key
     });
 
+    test('after dispose evict/clearCache/writes never touch storage', () async {
+      final m = make();
+      expect(await m.getData('k'), 101);
+      await pump();
+      expect(storage.entries.keys, ['k']);
+      m.dispose();
+      m.evict('k');
+      m.clearCache();
+      m.set('j', 1);
+      await pump();
+      expect(storage.entries.keys, ['k']);
+      expect(await m.getData('k'), 102); // storage is not read either
+    });
+
     group('m6', () {
       test('watch(fetch: false) restores the persisted value, no network',
           () async {

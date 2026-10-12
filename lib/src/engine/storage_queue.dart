@@ -17,6 +17,11 @@ class StorageQueue<K, V> {
   final int version;
 
   Future<void> _tail = Future<void>.value();
+  bool _closed = false;
+
+  /// After this every method is a no-op (reads `null`). Operations queued
+  /// before still run.
+  void close() => _closed = true;
 
   /// Persists [value] for [key].
   void write(K key, V value, DateTime fetchedAt) => _enqueue(
@@ -36,7 +41,7 @@ class StorageQueue<K, V> {
   /// delete. It does not hold up operations queued after it.
   Future<StoredEntry<V>?> read(K key) {
     final s = storage;
-    if (s == null) return Future.value();
+    if (s == null || _closed) return Future.value();
     final result = Completer<StoredEntry<V>?>();
     _tail.then((_) async {
       try {
@@ -57,7 +62,7 @@ class StorageQueue<K, V> {
 
   void _enqueue(Future<void> Function(ReactiveStorage<K, V> s) op) {
     final s = storage;
-    if (s == null) return;
+    if (s == null || _closed) return;
     _tail = _tail.then((_) async {
       try {
         await op(s);

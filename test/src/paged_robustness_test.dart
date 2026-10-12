@@ -648,6 +648,80 @@ void main() {
       expect(ids(await f.bounded), ['h', 'x', 'a', 'b', 'c', 'z']);
     });
   });
+
+  group('nits: value equality and dispose', () {
+    test('PagedState, PagedEdge and PagedError have value equality', () {
+      final st = StackTrace.current;
+      final e1 = PagedError('x', st);
+      expect(e1, PagedError('x', st));
+      expect(e1.hashCode, PagedError('x', st).hashCode);
+      expect(e1, isNot(PagedError('y', st)));
+      const edge = PagedEdge(hasMore: true);
+      expect(edge, const PagedEdge(hasMore: true));
+      expect(edge.hashCode, const PagedEdge(hasMore: true).hashCode);
+      expect(edge, isNot(const PagedEdge(hasMore: true, isLoading: true)));
+      expect(PagedEdge(error: e1), PagedEdge(error: PagedError('x', st)));
+      final at = DateTime(2026);
+      PagedState<Item> state(List<Item> list, {bool stale = false}) =>
+          PagedState<Item>(
+            items: List.unmodifiable(list),
+            hasLoaded: true,
+            refreshError: e1,
+            next: edge,
+            totalCount: 3,
+            fetchedAt: at,
+            isStale: stale,
+          );
+      final a = state(items(['a', 'b']));
+      expect(a, state(items(['a', 'b'])));
+      expect(a.hashCode, state(items(['a', 'b'])).hashCode);
+      expect(a, isNot(state(items(['a', 'c']))));
+      expect(a, isNot(state(items(['a']))));
+      expect(a, isNot(state(items(['a', 'b']), stale: true)));
+      expect(a, isNot(const PagedState<Item>()));
+      expect(const PagedState<Item>(), const PagedState<Item>());
+      expect(a == a, isTrue);
+    });
+
+    test('the manager never emits a state equal to the previous one', () async {
+      final s = Scripted();
+      final m = make(s);
+      final states = <PagedState<Item>>[];
+      final sub = m.watch('q').listen(states.add);
+      await pump();
+      s.completeLast(items(['a', 'b']), next: 2);
+      await pump();
+      final count = states.length;
+      m.upsertItem('q', it('a')); // replaced by an equal item
+      m.patchItem('a', (i) => i); // identity transform
+      m.upsertItem('q', it('a'));
+      await pump();
+      expect(states, hasLength(count));
+      m.patchItem('a', (i) => it('a', 1));
+      await pump();
+      expect(states, hasLength(count + 1));
+      for (var i = 1; i < states.length; i++) {
+        expect(states[i], isNot(states[i - 1]));
+      }
+      await sub.cancel();
+    });
+
+    test('after dispose evict/clearCache/loads never touch storage', () async {
+      final storage = InMemoryReactiveStorage<String, PagedSnapshot<Item>>();
+      final s = Scripted();
+      final m = make(s, storage: storage);
+      await seed(m, s, 'q', items(['a']));
+      await settle();
+      expect(storage.entries.keys, ['q']);
+      await m.dispose();
+      m.evict('q');
+      m.clearCache();
+      await settle();
+      expect(storage.entries.keys, ['q']);
+      expect(await m.refresh('q'), const PagedState<Item>());
+      expect(s.requests, hasLength(1));
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {

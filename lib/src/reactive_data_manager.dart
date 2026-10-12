@@ -586,8 +586,10 @@ class ReactiveDataManager<K, T> {
     _errorChannels.remove(key)?.close();
   }
 
-  /// Dispose resources
+  /// Dispose resources. Storage is no longer touched afterwards (`evict` and
+  /// `clearCache` then only drop memory).
   void dispose() {
+    _storage.close();
     for (final fetch in _activeFetches.takeAll()) {
       fetch.discard();
     }
