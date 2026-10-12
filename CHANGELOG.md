@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.0 (2026-10-12)
+
+### Changed (behaviour fixes)
+- `getData` no longer cancels the in-flight fetch. Concurrent calls for one key **join a single fetch** and all complete with its result or error; previously every call hit the fetcher and all but the last future hung forever. Only `forceRefresh: true` starts a new fetch, and callers of the superseded fetch complete with the newer result.
+- A cached read no longer cancels an in-flight forced refresh.
+- `clearCache()` and `evict(key)` now discard results of fetches started before them (a logout can no longer be repopulated by a late response). Such callers complete with the fetch's own result, which is not cached.
+- `updateData`: a superseded or evicted update now completes with its own result (it used to hang) and no longer rolls back the newer value. The unused `async` dependency was removed.
+- The `fetcher` field is no longer public (the constructor parameter is unchanged).
+
+### Added
+- `maxAge` (constructor and per call), injectable `clock`, `fetchedAt(key)`, `isFresh(key)`.
+- `invalidate(key)` / `invalidateAll()` — stale-while-revalidate: the value stays visible, in-flight results are discarded.
+- `refresh(key)` — fire-and-forget refetch, errors only via the stream.
+- `watch(key, {fetch})` — non-null `Stream<T>` that fetches when missing or stale.
+- `mutate(key, action, {invalidate})` — invalidates afterwards, also when the action fails.
+- `set(key, value)` / `patch(key, transform)` — plain cache writes, no updater or rollback. An in-flight fetch is discarded so it cannot overwrite them.
+- `replayErrors: false` — do not replay the last error to late subscribers.
+- `errorMapper` — surfaces typed errors on the stream and from `getData`.
+- `ReactiveDataManager.cancellable` — fetcher receiving a cancellation signal (completes when the fetch is superseded, invalidated, cleared or evicted), e.g. for Dio's `CancelToken`.
+- `ReactiveValue<T>` — keyless single-value manager with the same API.
+- Persistence: `ReactiveStorage`, `StoredEntry`, `InMemoryReactiveStorage`, `storage` / `storageVersion` options (stale-while-revalidate across restarts).
+
 ## 1.1.0 (2026-09-01)
 
 ### Added
