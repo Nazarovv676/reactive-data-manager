@@ -92,6 +92,9 @@ class ReactiveValue<T> {
   /// See [ReactiveDataManager.refresh].
   void refresh() => _manager.refresh(_key);
 
+  /// See [ReactiveDataManager.prefetch].
+  void prefetch() => _manager.prefetch(_key);
+
   /// See [ReactiveDataManager.watch].
   Stream<T> watch({bool fetch = true}) => _manager.watch(_key, fetch: fetch);
 

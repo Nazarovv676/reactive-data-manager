@@ -400,6 +400,18 @@ class ReactivePagedManager<Q, T, C extends Object> {
     return _startHead(e, query, anchor: anchor, mode: wanted).future;
   }
 
+  /// Fire-and-forget: loads the first page of [query] when nothing is loaded
+  /// yet, or when what is loaded is stale (invalidated, older than [maxAge],
+  /// or only restored from storage). Otherwise, and while a first-page load
+  /// or refresh is already running, it does nothing. Never throws; failures
+  /// go to the state and [onError] as usual. The query is cached unwatched,
+  /// so it counts towards [maxEntries] and [evictAfterUnwatched].
+  void prefetch(Q query) {
+    if (_disposed) return;
+    final e = _entryFor(query);
+    if (e.head == null && (!e.hasLoaded || _isStale(e))) _startHead(e, query);
+  }
+
   Future<PagedState<T>> _loadEdge(Q query, {required bool forward}) {
     if (_disposed) return Future.value(const PagedState());
     final e = _entryFor(query);

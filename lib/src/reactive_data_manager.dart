@@ -250,6 +250,14 @@ class ReactiveDataManager<K, T> {
     getData(key, forceRefresh: true).ignore();
   }
 
+  /// Fire-and-forget, non-forced [getData]: warms the cache for [key] (e.g.
+  /// before navigating to a screen that shows it). Does nothing when a fresh
+  /// value is cached, joins a fetch that is already in flight, otherwise
+  /// starts one. Never throws; errors are delivered only through the stream.
+  void prefetch(K key) {
+    getData(key).ignore();
+  }
+
   Operation<T> _startFetch(K key) {
     final fetch = Operation<T>();
     // Callers of the superseded fetch must not wait for its (abandoned)
