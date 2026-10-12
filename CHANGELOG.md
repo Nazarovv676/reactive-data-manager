@@ -18,6 +18,9 @@
 - `package:reactive_data_manager/testing.dart` with `ScriptedPageFetcher`.
 - `ReactiveDataManager.invalidateWhere` and `patchWhere`.
 
+### Changed (internal)
+- `ReactiveDataManager`, `ReactiveValue` and `ReactivePagedManager` now run on a shared internal engine (`lib/src/engine/`): in-flight operations with abort signals and per-lane join/supersede, freshness against the injectable clock, the serialized storage queue with version checks, and the entry registry (watcher ref-count, `maxEntries` LRU, `evictAfterUnwatched` timers). No public API or behaviour change.
+
 ## 1.2.0 (2026-10-12)
 
 ### Changed (behaviour fixes)

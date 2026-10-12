@@ -9,9 +9,9 @@ export 'src/exceptions.dart'
         ReactiveDataException,
         OptimisticUpdateException,
         DataFilteredException;
+export 'src/engine/abort.dart' show AbortSignal;
 export 'src/paged/paged_types.dart'
     show
-        AbortSignal,
         PageDirection,
         PageRequest,
         PageResult,

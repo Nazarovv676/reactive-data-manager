@@ -1,50 +1,10 @@
 import 'dart:async';
+import 'package:reactive_data_manager/src/engine/freshness.dart';
+import 'package:reactive_data_manager/src/engine/operation.dart';
+import 'package:reactive_data_manager/src/engine/storage_queue.dart';
 import 'package:reactive_data_manager/src/exceptions.dart';
 import 'package:reactive_data_manager/src/storage.dart';
 import 'package:rxdart/rxdart.dart';
-
-/// One in-flight fetch for a key. Every caller that joins it shares [future].
-class _Fetch<T> {
-  _Fetch() {
-    // Callers that never await (e.g. `refresh`) must not trigger an unhandled
-    // zone error; callers that do await still receive the error.
-    _completer.future.ignore();
-  }
-
-  final Completer<T> _completer = Completer<T>();
-  final Completer<void> _cancel = Completer<void>();
-
-  /// Set when the result must not be written to the cache (superseded,
-  /// invalidated, cleared, evicted, overwritten by `set`, or disposed).
-  bool discarded = false;
-
-  /// The fetch that replaced this one through `forceRefresh`, if any.
-  _Fetch<T>? successor;
-
-  Future<T> get future => _completer.future;
-
-  /// Completes when this fetch is no longer wanted.
-  Future<void> get signal => _cancel.future;
-
-  void discard({_Fetch<T>? by}) {
-    discarded = true;
-    if (by != null && successor == null) {
-      successor = by;
-      // Callers of a superseded fetch must not wait for its (abandoned)
-      // request: they complete with the newer result right away.
-      if (!_completer.isCompleted) _completer.complete(by.future);
-    }
-    if (!_cancel.isCompleted) _cancel.complete();
-  }
-
-  void succeed(T value) {
-    if (!_completer.isCompleted) _completer.complete(value);
-  }
-
-  void fail(Object error, StackTrace stackTrace) {
-    if (!_completer.isCompleted) _completer.completeError(error, stackTrace);
-  }
-}
 
 class _Hydration {
   late final Future<void> future;
@@ -162,15 +122,17 @@ class ReactiveDataManager<K, T> {
   final Set<K> _stale = {};
   DateTime? _invalidatedAllAt;
 
-  /// Active fetch operations for each key.
-  final Map<K, _Fetch<T>> _activeFetches = {};
+  /// Active fetch operations, one lane per key.
+  final InFlight<K, Operation<T>> _activeFetches = InFlight();
 
   /// Active update operations for each key.
   final Map<K, Object> _activeUpdates = {};
 
   final Map<K, _Hydration> _hydrations = {};
   final Set<K> _hydrated = {};
-  Future<void> _storageTail = Future<void>.value();
+  late final StorageQueue<K, T> _storage =
+      StorageQueue(storage, storageVersion);
+  late final Freshness _freshness = Freshness(clock, maxAge);
 
   /// Get a stream for a specific key
   Stream<T?> getStream(K key) {
@@ -207,10 +169,7 @@ class ReactiveDataManager<K, T> {
   /// [maxAge] (defaults to the manager's [maxAge]).
   bool isFresh(K key, {Duration? maxAge}) {
     if (!_cache.containsKey(key) || _stale.contains(key)) return false;
-    final limit = maxAge ?? this.maxAge;
-    if (limit == null) return true;
-    final at = _fetchedAt[key];
-    return at != null && clock().difference(at) < limit;
+    return !_freshness.isExpired(_fetchedAt[key], maxAge: maxAge);
   }
 
   /// Fetch data safely for a specific key.
@@ -249,18 +208,20 @@ class ReactiveDataManager<K, T> {
     getData(key, forceRefresh: true).ignore();
   }
 
-  _Fetch<T> _startFetch(K key) {
-    final fetch = _Fetch<T>();
-    _activeFetches[key]?.discard(by: fetch);
+  Operation<T> _startFetch(K key) {
+    final fetch = Operation<T>();
+    // Callers of the superseded fetch must not wait for its (abandoned)
+    // request: they complete with the newer result right away.
+    _activeFetches[key]?.discardWith(fetch.future);
     _activeFetches[key] = fetch;
     _runFetch(key, fetch);
     return fetch;
   }
 
-  Future<void> _runFetch(K key, _Fetch<T> fetch) async {
+  Future<void> _runFetch(K key, Operation<T> fetch) async {
     T result;
     try {
-      result = await _fetcher(key, fetch.signal);
+      result = await _fetcher(key, fetch.signal.whenAborted);
     } catch (e, s) {
       final error = errorMapper?.call(e, s) ?? e;
       if (!fetch.discarded) _emitError(key, error, s);
@@ -285,7 +246,7 @@ class ReactiveDataManager<K, T> {
         _write(key, result);
       }
       _finish(key, fetch);
-      fetch.succeed(result);
+      fetch.resolve(result);
     } catch (e, s) {
       _emitError(key, e, s);
       _finish(key, fetch);
@@ -293,9 +254,7 @@ class ReactiveDataManager<K, T> {
     }
   }
 
-  void _finish(K key, _Fetch<T> fetch) {
-    if (identical(_activeFetches[key], fetch)) _activeFetches.remove(key);
-  }
+  void _finish(K key, Operation<T> fetch) => _activeFetches.finish(key, fetch);
 
   /// Update data safely for a specific key.
   ///
@@ -365,7 +324,7 @@ class ReactiveDataManager<K, T> {
             _cache.remove(key);
             _fetchedAt.remove(key);
             _getSubjectForKey(key).add(null);
-            _enqueueStorage((s) => s.delete(key));
+            _storage.delete(key);
           }
         }
         throw const OptimisticUpdateException();
@@ -378,7 +337,7 @@ class ReactiveDataManager<K, T> {
   /// the stream synchronously and [fetchedAt]. A fetch that is in flight is
   /// discarded, so its older response never overwrites [value].
   void set(K key, T value) {
-    _activeFetches.remove(key)?.discard();
+    _activeFetches.take(key)?.discard();
     _write(key, value);
   }
 
@@ -388,7 +347,7 @@ class ReactiveDataManager<K, T> {
   void patch(K key, T Function(T current) transform) {
     if (!_cache.containsKey(key)) return;
     final wasStale = _stale.contains(key);
-    _activeFetches.remove(key)?.discard();
+    _activeFetches.take(key)?.discard();
     _write(key, transform(_cache[key] as T), markFresh: !wasStale);
   }
 
@@ -396,7 +355,7 @@ class ReactiveDataManager<K, T> {
   /// is discarded; the next [getData] fetches again.
   void invalidate(K key) {
     _stale.add(key);
-    _activeFetches.remove(key)?.discard();
+    _activeFetches.take(key)?.discard();
   }
 
   /// [invalidate] for every cached key matching [test].
@@ -415,7 +374,7 @@ class ReactiveDataManager<K, T> {
       final next = transform(key, _cache[key] as T);
       if (next == null) continue;
       final wasStale = _stale.contains(key);
-      _activeFetches.remove(key)?.discard();
+      _activeFetches.take(key)?.discard();
       _write(key, next, markFresh: !wasStale);
     }
   }
@@ -424,10 +383,9 @@ class ReactiveDataManager<K, T> {
   void invalidateAll() {
     _invalidatedAllAt = clock();
     _stale.addAll(_cache.keys);
-    for (final fetch in _activeFetches.values) {
+    for (final fetch in _activeFetches.takeAll()) {
       fetch.discard();
     }
-    _activeFetches.clear();
   }
 
   /// Runs [action] and invalidates [key] afterwards, whether it succeeded or
@@ -450,10 +408,7 @@ class ReactiveDataManager<K, T> {
     _fetchedAt[key] = fetchedAt;
     if (markFresh) _stale.remove(key);
     _getSubjectForKey(key).add(value);
-    _enqueueStorage((s) => s.write(
-          key,
-          StoredEntry<T>(value, fetchedAt, version: storageVersion),
-        ));
+    _storage.write(key, value, fetchedAt);
   }
 
   void _emitError(K key, Object error, [StackTrace? stackTrace]) {
@@ -475,50 +430,25 @@ class ReactiveDataManager<K, T> {
 
   // --- persistence ---------------------------------------------------------
 
-  /// Storage operations run one after another, errors never escape.
-  void _enqueueStorage(Future<void> Function(ReactiveStorage<K, T> s) op) {
-    final s = storage;
-    if (s == null) return;
-    _storageTail = _storageTail.then((_) async {
-      try {
-        await op(s);
-      } catch (_) {}
-    });
-  }
-
   Future<void>? _hydrate(K key) {
-    final s = storage;
-    if (s == null || _cache.containsKey(key) || _hydrated.contains(key)) {
+    if (storage == null || _cache.containsKey(key) || _hydrated.contains(key)) {
       return null;
     }
     final existing = _hydrations[key];
     if (existing != null) return existing.future;
     final hydration = _Hydration();
     _hydrations[key] = hydration;
-    hydration.future = _readStored(key, s, hydration);
+    hydration.future = _readStored(key, hydration);
     return hydration.future;
   }
 
-  Future<void> _readStored(
-    K key,
-    ReactiveStorage<K, T> s,
-    _Hydration hydration,
-  ) async {
-    StoredEntry<T>? entry;
-    try {
-      entry = await s.read(key);
-    } catch (_) {
-      entry = null;
-    }
+  Future<void> _readStored(K key, _Hydration hydration) async {
+    final entry = await _storage.read(key);
     // Evicted or cleared while reading: drop the result.
     if (!identical(_hydrations[key], hydration)) return;
     _hydrations.remove(key);
     _hydrated.add(key);
-    if (entry == null) return;
-    if (entry.version != storageVersion) {
-      _enqueueStorage((s) => s.delete(key));
-      return;
-    }
+    if (entry == null || !_storage.accept(key, entry)) return;
     if (_cache.containsKey(key)) return;
     _cache[key] = entry.value;
     _fetchedAt[key] = entry.fetchedAt;
@@ -534,17 +464,16 @@ class ReactiveDataManager<K, T> {
   /// Clear the cache. Fetches that are in flight are discarded and persisted
   /// entries are deleted.
   void clearCache() {
-    for (final fetch in _activeFetches.values) {
+    for (final fetch in _activeFetches.takeAll()) {
       fetch.discard();
     }
-    _activeFetches.clear();
     _cache.clear();
     _fetchedAt.clear();
     _stale.clear();
     _invalidatedAllAt = null;
     _hydrations.clear();
     _hydrated.clear();
-    _enqueueStorage((s) => s.clear());
+    _storage.clear();
     for (final subject in _dataSubjects.values) {
       subject.add(null);
     }
@@ -556,21 +485,21 @@ class ReactiveDataManager<K, T> {
   /// [clearCache], which resets every key, this only affects [key]. The
   /// persisted entry is deleted too.
   void evict(K key) {
-    _activeFetches.remove(key)?.discard();
+    _activeFetches.take(key)?.discard();
     _activeUpdates.remove(key);
     _cache.remove(key);
     _fetchedAt.remove(key);
     _stale.remove(key);
     _hydrations.remove(key);
     _hydrated.remove(key);
-    _enqueueStorage((s) => s.delete(key));
+    _storage.delete(key);
     _dataSubjects.remove(key)?.close();
     _errorChannels.remove(key)?.close();
   }
 
   /// Dispose resources
   void dispose() {
-    for (final fetch in _activeFetches.values) {
+    for (final fetch in _activeFetches.takeAll()) {
       fetch.discard();
     }
     for (final subject in _dataSubjects.values) {
@@ -579,7 +508,6 @@ class ReactiveDataManager<K, T> {
     for (final channel in _errorChannels.values) {
       channel.close();
     }
-    _activeFetches.clear();
     _activeUpdates.clear();
     _dataSubjects.clear();
     _errorChannels.clear();

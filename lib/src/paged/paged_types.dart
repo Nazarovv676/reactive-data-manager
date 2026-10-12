@@ -1,33 +1,4 @@
-import 'dart:async';
-
-/// A cancellation signal handed to a page fetcher. It is aborted when the
-/// request is superseded, invalidated, evicted, cleared or disposed. Wire it to
-/// e.g. Dio's `CancelToken`. Ignoring it is always safe.
-class AbortSignal {
-  AbortSignal._(this._completer);
-
-  final Completer<void> _completer;
-
-  /// Whether the request is no longer wanted.
-  bool get aborted => _completer.isCompleted;
-
-  /// Completes when the request is no longer wanted.
-  Future<void> get whenAborted => _completer.future;
-}
-
-/// Creates an [AbortSignal] and aborts it. Internal.
-class AbortController {
-  AbortController() {
-    signal = AbortSignal._(_completer);
-  }
-
-  final Completer<void> _completer = Completer<void>();
-  late final AbortSignal signal;
-
-  void abort() {
-    if (!_completer.isCompleted) _completer.complete();
-  }
-}
+import 'package:reactive_data_manager/src/engine/abort.dart';
 
 /// Which part of the list a request is for.
 enum PageDirection {
