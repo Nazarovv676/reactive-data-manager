@@ -849,6 +849,61 @@ void main() {
       await sub.cancel();
     });
   });
+
+  group('N7: a broken page-count invariant is loud, but never hangs', () {
+    // Runs [body] in a zone that records uncaught errors. The expectations
+    // run outside: a failing `expect` inside the zone would be swallowed.
+    Future<List<Object>> uncaught(Future<void> Function() body) async {
+      final errors = <Object>[];
+      await runZonedGuarded(body, (e, _) => errors.add(e));
+      return errors;
+    }
+
+    for (final forward in [true, false]) {
+      test(
+          '${forward ? 'loadNext' : 'loadPrevious'} resolves, then the error '
+          'escapes', () async {
+        PagedState<Item>? state;
+        List<Item>? seen;
+        var again = 0;
+        final errors = await uncaught(() async {
+          final s = Scripted();
+          final m = make(s);
+          await seed(m, s, 'q', items(['b']), next: 3, previous: 1);
+          m.debugCorruptPageCounts('q');
+          final f = forward ? m.loadNext('q') : m.loadPrevious('q');
+          s.completeLast(items([forward ? 'c' : 'a']), next: 4, previous: 0);
+          state = await f.bounded;
+          seen = state!.items;
+          // The lane was released: the next call starts a request.
+          final before = s.requests.length;
+          forward ? m.loadNext('q') : m.loadPrevious('q');
+          again = s.requests.length - before;
+        });
+        expect(state, isNotNull, reason: 'the future completed');
+        final failure = forward ? state!.next : state!.previous;
+        expect(failure.isLoading, isFalse);
+        expect(failure.error!.error.toString(), contains('invariant'));
+        expect(seen, isNotEmpty);
+        expect(again, 1);
+        expect(errors, hasLength(1));
+        expect(errors.single.toString(), contains('invariant'));
+      });
+    }
+
+    test('without a corrupted entry nothing changes', () async {
+      final errors = await uncaught(() async {
+        final s = Scripted();
+        final m = make(s);
+        m.debugCorruptPageCounts('unknown'); // no entry: a no-op
+        await seed(m, s, 'q', items(['a']), next: 2);
+        final f = m.loadNext('q');
+        s.completeLast(items(['b']));
+        expect(ids(await f.bounded), ['a', 'b']);
+      });
+      expect(errors, isEmpty);
+    });
+  });
 }
 
 class _SyncThrowing implements ReactiveStorage<String, PagedSnapshot<Item>> {

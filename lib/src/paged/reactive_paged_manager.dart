@@ -60,6 +60,18 @@ class _Page<C extends Object> {
   C? next;
 }
 
+/// The page bookkeeping drifted from the list: a bug in this package. Only
+/// thrown in debug builds (see `_checkPages`) and rethrown by the load that
+/// found it once that load is resolved.
+final class _PageInvariantError extends Error {
+  _PageInvariantError(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'ReactivePagedManager invariant: $message';
+}
+
 /// The independent in-flight lanes of a query.
 enum _Lane { head, next, previous }
 
@@ -373,6 +385,14 @@ class ReactivePagedManager<Q, T, C extends Object> {
     );
   }
 
+  /// Breaks the page bookkeeping of [query] on purpose, to test that the
+  /// debug-build invariant check is loud. For tests only.
+  @visibleForTesting
+  void debugCorruptPageCounts(Q query) {
+    final e = _entries[query];
+    if (e != null && e.pages.isNotEmpty) e.pages.first.count++;
+  }
+
   // --- loading -------------------------------------------------------------
 
   /// Loads the page after the tail. Joins an in-flight `loadNext`, and joins a
@@ -498,6 +518,9 @@ class ReactivePagedManager<Q, T, C extends Object> {
       _applyHead(e, op, results);
     } catch (error, stack) {
       _failHead(e, query, op, error, stack);
+      // The op is resolved, so nothing hangs; a broken invariant must not stay
+      // hidden in `refreshError`.
+      if (error is _PageInvariantError) Error.throwWithStackTrace(error, stack);
       return;
     }
     e.totalCount = results.last.totalCount ?? results.first.totalCount;
@@ -593,7 +616,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
         e.pages = [...head, ...rest];
         e.prevCursor = first.previous;
         e.prevMore = first.previous != null;
-        assert(_pagesMatch(e), 'page counts drifted from the list');
+        _checkPages(e);
         return;
       }
     }
@@ -628,7 +651,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
     e.nextMore = results.last.next != null;
     e.prevCursor = first.previous;
     e.prevMore = first.previous != null;
-    assert(_pagesMatch(e), 'page counts drifted from the list');
+    _checkPages(e);
   }
 
   /// Whether [edit] is an upsert of an item absent from [list] at an end that
@@ -664,6 +687,19 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// what windowing and `Retention.firstPage` rely on.
   bool _pagesMatch(_Entry<T, C> e) =>
       e.pages.fold<int>(0, (a, p) => a + p.count) == e.items.length;
+
+  /// Debug-only check of [_pagesMatch]. It throws a [_PageInvariantError], not
+  /// an [AssertionError]: a load rethrows that one (after resolving the
+  /// operation) so a bug in the manager is loud, while an `assert` failing in
+  /// user code (`fetchPage`, `idOf`) still only fails the load.
+  void _checkPages(_Entry<T, C> e) {
+    assert(() {
+      if (!_pagesMatch(e)) {
+        throw _PageInvariantError('page counts drifted from the list');
+      }
+      return true;
+    }());
+  }
 
   Future<void> _runEdge(
     _Entry<T, C> e,
@@ -771,10 +807,11 @@ class ReactivePagedManager<Q, T, C extends Object> {
         break;
       }
 
-      assert(_pagesMatch(e), 'page counts drifted from the list');
+      _checkPages(e);
       _window(e, forward);
     } catch (error, stack) {
       fail(error, stack);
+      if (error is _PageInvariantError) Error.throwWithStackTrace(error, stack);
       return;
     }
     clearLane();
