@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:reactive_data_manager/src/engine/entry_registry.dart';
 import 'package:reactive_data_manager/src/engine/freshness.dart';
@@ -712,6 +713,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
             consumed += result.items.length;
             continue;
           }
+          _warnUnproductive(query, direction);
           if (forward) {
             e.nextMore = false;
           } else {
@@ -1325,6 +1327,23 @@ class ReactivePagedManager<Q, T, C extends Object> {
     if (e.subject.isClosed) return;
     final state = _stateOf(e);
     if (e.subject.valueOrNull != state) e.subject.add(state);
+  }
+
+  /// Debug builds only: tells the developer that an edge was given up because
+  /// [maxUnproductivePages] pages in a row added nothing new (usually a
+  /// fetcher that keeps returning a cursor with empty or duplicate pages).
+  void _warnUnproductive(Q query, PageDirection direction) {
+    assert(() {
+      developer.log(
+        '$maxUnproductivePages page(s) in a row added no new items for query '
+        '$query (${direction.name}); the edge is treated as exhausted. Check '
+        'that the fetcher returns a null cursor at the end of the list, or '
+        'raise maxUnproductivePages.',
+        name: 'reactive_data_manager',
+        level: 900, // WARNING
+      );
+      return true;
+    }());
   }
 
   void _report(Q query, PageDirection d, Object error, StackTrace stack) {
