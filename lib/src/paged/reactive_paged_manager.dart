@@ -323,8 +323,12 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   /// The state of [query] as a stream. Emits the current state first, then
   /// every change. With [fetch] (default) it loads the first page when the
-  /// query has nothing loaded yet or is stale. Listening is ref-counted: it
-  /// drives [evictAfterUnwatched] and [maxEntries].
+  /// query has nothing loaded yet or is stale; that load starts before the
+  /// first emission, so the first state already has `isRefreshing: true` (a
+  /// new query never emits an idle empty state first). An idle state with
+  /// nothing loaded therefore means "not fetching" (`fetch: false`) or "reset"
+  /// (after [evict] / [clearCache]). Listening is ref-counted: it drives
+  /// [evictAfterUnwatched] and [maxEntries].
   ///
   /// Each call returns a new single-subscription stream.
   Stream<PagedState<T>> watch(Q query, {bool fetch = true}) {
@@ -340,13 +344,16 @@ class ReactivePagedManager<Q, T, C extends Object> {
         final e = _entryFor(query);
         entry = e;
         _entries.watch(e);
+        // Start the load before subscribing, so the first state the listener
+        // gets already has `isRefreshing: true` (never an idle state that is
+        // immediately followed by a loading one).
+        if (fetch && e.head == null && (!e.hasLoaded || _isStale(e))) {
+          _startHead(e, query);
+        }
         sub = e.subject.stream.listen(
           controller.add,
           onDone: controller.close,
         );
-        if (fetch && e.head == null && (!e.hasLoaded || _isStale(e))) {
-          _startHead(e, query);
-        }
       },
       onCancel: () {
         final e = entry;

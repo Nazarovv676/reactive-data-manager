@@ -444,6 +444,11 @@ Rules worth knowing:
   get the state, not a replayed error.
 - `PagedState` (and `PagedEdge`, `PagedError`) have value equality; a state
   equal to the previous one is never emitted.
+- When `watch` (with the default `fetch: true`) starts a load, its first state
+  already has `isRefreshing: true` (`isLoadingInitial` for a new query): there
+  is no idle empty state before the load. An idle state with nothing loaded
+  (`!hasLoaded && !isRefreshing`) therefore means `watch(fetch: false)` or a
+  reset by `evict`/`clearCache` (e.g. logout).
 - Concurrent `loadNext` calls share one request. `loadNext` during a refresh
   joins it, so a page is never appended to a list that is being replaced.
   `refresh` aborts running `loadNext`/`loadPrevious`.
