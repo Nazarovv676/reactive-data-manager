@@ -33,3 +33,5 @@ build/
 
 # Stray packaging artifacts — must never be bundled into a `pub publish`.
 *.tar.gz
+# Test coverage output
+coverage/

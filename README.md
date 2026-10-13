@@ -1,6 +1,7 @@
 # Reactive Data Manager
 
-A Flutter package that provides a robust, reactive data management solution with built-in caching, optimistic updates, and error handling capabilities.
+A pure Dart package (works in Flutter apps and in plain Dart code, e.g. a
+Flutter-free domain layer) that provides a robust, reactive data management solution with built-in caching, optimistic updates, and error handling capabilities.
 
 ## Features
 

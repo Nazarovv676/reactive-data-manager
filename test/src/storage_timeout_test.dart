@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
 import 'package:reactive_data_manager/reactive_data_manager.dart';
 import 'package:reactive_data_manager/src/engine/storage_queue.dart';
 

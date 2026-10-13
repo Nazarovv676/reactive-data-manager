@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
 import 'package:reactive_data_manager/reactive_data_manager.dart';
 
 /// A fetcher whose calls are completed by hand.
