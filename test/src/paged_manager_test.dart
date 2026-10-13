@@ -721,6 +721,38 @@ void main() {
     });
   });
 
+  group('loadNext / loadPrevious on an uncached query', () {
+    for (final forward in [true, false]) {
+      final name = forward ? 'loadNext' : 'loadPrevious';
+
+      test('$name caches the query and loads its first page', () async {
+        final s = Script();
+        final m = make(s);
+        expect(m.peek('q'), isNull);
+        final f = forward ? m.loadNext('q') : m.loadPrevious('q');
+        expect(m.cachedQueries, ['q']);
+        expect(m.peek('q')!.isLoadingInitial, isTrue);
+        expect(s.reqs.single.direction, PageDirection.initial);
+        expect(s.reqs.single.cursor, isNull);
+        s.ok(0, items(['a']), next: 2);
+        final st = await f;
+        expect(st.items, items(['a']));
+        expect(st.hasLoaded, isTrue);
+      });
+
+      test('$name on a cached but unloaded query also loads the first page',
+          () async {
+        final s = Script();
+        final m = make(s);
+        await m.watch('q', fetch: false).first; // cached, nothing loaded
+        final f = forward ? m.loadNext('q') : m.loadPrevious('q');
+        expect(s.reqs.single.direction, PageDirection.initial);
+        s.ok(0, items(['a']));
+        expect((await f).items, items(['a']));
+      });
+    }
+  });
+
   group('watch: first emission', () {
     bool idleEmpty(PagedState<Item> s) => !s.hasLoaded && !s.isRefreshing;
 

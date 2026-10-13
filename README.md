@@ -444,6 +444,13 @@ Rules worth knowing:
   get the state, not a replayed error.
 - `PagedState` (and `PagedEdge`, `PagedError`) have value equality; a state
   equal to the previous one is never emitted.
+- `loadNext`/`loadPrevious` on a query that is **not cached** is not a no-op:
+  it caches the query (unwatched) and loads its *first* page. This usually
+  means the query passed to `loadNext` is not equal to the one passed to
+  `watch` (e.g. a filter object rebuilt without value equality), which costs an
+  extra request and an entry nobody watches. Debug builds log a warning through
+  `dart:developer` (name `reactive_data_manager`). Pass the exact query you
+  watch (or check `peek(query) != null` first).
 - When `watch` (with the default `fetch: true`) starts a load, its first state
   already has `isRefreshing: true` (`isLoadingInitial` for a new query): there
   is no idle empty state before the load. An idle state with nothing loaded
