@@ -24,7 +24,7 @@ Add this to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-    reactive_data_manager: ^2.0.0
+    reactive_data_manager: ^2.1.0
 ```
 
 ## Basic Usage
