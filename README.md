@@ -1,6 +1,7 @@
 # Reactive Data Manager
 
-A Flutter package that provides a robust, reactive data management solution with built-in caching, optimistic updates, and error handling capabilities.
+A pure Dart package (works in Flutter apps and in plain Dart code, e.g. a
+Flutter-free domain layer) that provides a robust, reactive data management solution with built-in caching, optimistic updates, and error handling capabilities.
 
 ## Features
 
@@ -23,7 +24,7 @@ Add this to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-    reactive_data_manager: ^2.0.0
+    reactive_data_manager: ^2.1.0
 ```
 
 ## Basic Usage
@@ -443,6 +444,18 @@ Rules worth knowing:
   get the state, not a replayed error.
 - `PagedState` (and `PagedEdge`, `PagedError`) have value equality; a state
   equal to the previous one is never emitted.
+- `loadNext`/`loadPrevious` on a query that is **not cached** is not a no-op:
+  it caches the query (unwatched) and loads its *first* page. This usually
+  means the query passed to `loadNext` is not equal to the one passed to
+  `watch` (e.g. a filter object rebuilt without value equality), which costs an
+  extra request and an entry nobody watches. Debug builds log a warning through
+  `dart:developer` (name `reactive_data_manager`). Pass the exact query you
+  watch (or check `peek(query) != null` first).
+- When `watch` (with the default `fetch: true`) starts a load, its first state
+  already has `isRefreshing: true` (`isLoadingInitial` for a new query): there
+  is no idle empty state before the load. An idle state with nothing loaded
+  (`!hasLoaded && !isRefreshing`) therefore means `watch(fetch: false)` or a
+  reset by `evict`/`clearCache` (e.g. logout).
 - Concurrent `loadNext` calls share one request. `loadNext` during a refresh
   joins it, so a page is never appended to a list that is being replaced.
   `refresh` aborts running `loadNext`/`loadPrevious`.
@@ -550,6 +563,85 @@ immediately with its original `fetchedAt`, marked `isStale`, and revalidated;
 network result wins over a slower read. `evict`/`clearCache` delete persisted
 entries (logout); LRU/timer eviction only frees memory. Storage errors never
 fail a load. `storageReadTimeout` drops a snapshot that takes longer to read.
+
+### Detecting a newly failed load (toasts)
+
+Errors live in the state (`refreshError`, `next.error`, `previous.error`), not
+in a stream of events, so a one-shot UI notification (a toast or snackbar)
+needs to know when an error *appears*. Checking `state.next.error != null` is
+not enough: the error stays in every later state (a `patchItem` re-emits it)
+until the next load in that direction, so you would show the toast again and
+again. Compare each state with the previous one instead:
+
+```dart
+extension NewFailures<T> on Stream<PagedState<T>> {
+  /// The errors that newly appear in the states of this stream (refresh,
+  /// next or previous), once per failed load. Errors already present in the
+  /// first state (e.g. when a screen is reopened) are skipped.
+  Stream<PagedError> newFailures() {
+    PagedState<T>? before;
+    return expand((after) {
+      final prev = before;
+      before = after;
+      if (prev == null) return const <PagedError>[];
+      return [
+        if (_isNew(prev.refreshError, after.refreshError)) after.refreshError!,
+        if (_isNew(prev.next.error, after.next.error)) after.next.error!,
+        if (_isNew(prev.previous.error, after.previous.error))
+          after.previous.error!,
+      ];
+    });
+  }
+}
+
+// PagedError has value equality: `!=` (not `identical`) is the right test.
+// It is still never fooled by two equal failures in a row, because a retry
+// clears the error (a state with `null` is emitted) before it can fail again.
+bool _isNew(PagedError? before, PagedError? after) =>
+    after != null && after != before;
+
+// UI: one subscription for the list, one for the toasts.
+events.watch(query).newFailures().listen(
+    (e) => showToast(e.errorAs<Failure>()?.message ?? 'Could not load'));
+```
+
+Notes:
+
+- `PagedError` compares `error` and `stackTrace`, so two failures with an
+  equal error (a `const` exception, or equal `Failure` values from your
+  `errorMapper`) and an empty stack trace are `==`. That is fine here: every
+  load clears its error first (`refreshError` when a refresh starts,
+  `next.error`/`previous.error` when `loadNext`/`loadPrevious` starts), and
+  that cleared state is always emitted, so the second failure is again a
+  change from `null`. Don't add `.distinct()` on the error stream for the same
+  reason: it would swallow the second toast.
+- Use `expand` (or rxdart's `pairwise()`) rather than an `async*` generator
+  with `await for`: cancelling an `async*` stream that is waiting in
+  `await for` does not complete until the source emits again, so the query
+  would stay watched after the screen is gone.
+- A screen opened after the failure gets the state with the error as its
+  first state; the code above shows no toast for it. Drop the `prev == null`
+  check if it should.
+
+With rxdart, the same diff over `pairwise()` (it starts at the second state,
+so errors already present when you subscribe are skipped too):
+
+```dart
+events.watch(query).pairwise().listen((pair) {
+    final [before, after] = pair;
+    for (final (b, a) in [
+        (before.refreshError, after.refreshError),
+        (before.next.error, after.next.error),
+        (before.previous.error, after.previous.error),
+    ]) {
+        if (a != null && a != b) showToast(a);
+    }
+});
+```
+
+Note that `watch` returns a new stream per call: use a separate `watch` for
+the toasts (or share one with `asBroadcastStream()`), never the list's stream
+twice.
 
 ### Testing
 

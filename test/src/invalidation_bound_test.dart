@@ -1,4 +1,4 @@
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
 import 'package:reactive_data_manager/reactive_data_manager.dart';
 
 /// `invalidateWhere` keeps at most 64 predicates for persisted values; older

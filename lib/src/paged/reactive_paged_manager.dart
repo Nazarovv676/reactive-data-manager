@@ -323,8 +323,12 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   /// The state of [query] as a stream. Emits the current state first, then
   /// every change. With [fetch] (default) it loads the first page when the
-  /// query has nothing loaded yet or is stale. Listening is ref-counted: it
-  /// drives [evictAfterUnwatched] and [maxEntries].
+  /// query has nothing loaded yet or is stale; that load starts before the
+  /// first emission, so the first state already has `isRefreshing: true` (a
+  /// new query never emits an idle empty state first). An idle state with
+  /// nothing loaded therefore means "not fetching" (`fetch: false`) or "reset"
+  /// (after [evict] / [clearCache]). Listening is ref-counted: it drives
+  /// [evictAfterUnwatched] and [maxEntries].
   ///
   /// Each call returns a new single-subscription stream.
   Stream<PagedState<T>> watch(Q query, {bool fetch = true}) {
@@ -340,13 +344,16 @@ class ReactivePagedManager<Q, T, C extends Object> {
         final e = _entryFor(query);
         entry = e;
         _entries.watch(e);
+        // Start the load before subscribing, so the first state the listener
+        // gets already has `isRefreshing: true` (never an idle state that is
+        // immediately followed by a loading one).
+        if (fetch && e.head == null && (!e.hasLoaded || _isStale(e))) {
+          _startHead(e, query);
+        }
         sub = e.subject.stream.listen(
           controller.add,
           onDone: controller.close,
         );
-        if (fetch && e.head == null && (!e.hasLoaded || _isStale(e))) {
-          _startHead(e, query);
-        }
       },
       onCancel: () {
         final e = entry;
@@ -399,9 +406,18 @@ class ReactivePagedManager<Q, T, C extends Object> {
   /// running head load instead of appending to a list being replaced. Starts
   /// the first load when nothing is loaded (or only a restored snapshot is);
   /// a no-op without more pages.
+  ///
+  /// A [query] that is not cached is **not** a no-op: it is cached (unwatched)
+  /// and its first page is loaded, as with [refresh]. This usually means the
+  /// caller passed a query that is not equal to the one it watches (e.g. a
+  /// rebuilt filter object without value equality), which costs an extra
+  /// request and an entry nobody watches; debug builds log a warning through
+  /// `dart:developer` (name `reactive_data_manager`). Pass the query you
+  /// [watch], or check [peek] first.
   Future<PagedState<T>> loadNext(Q query) => _loadEdge(query, forward: true);
 
-  /// Loads the page before the head. Same rules as [loadNext].
+  /// Loads the page before the head. Same rules as [loadNext], including the
+  /// first-page load (and debug warning) for a [query] that is not cached.
   Future<PagedState<T>> loadPrevious(Q query) =>
       _loadEdge(query, forward: false);
 
@@ -434,6 +450,7 @@ class ReactivePagedManager<Q, T, C extends Object> {
 
   Future<PagedState<T>> _loadEdge(Q query, {required bool forward}) {
     if (_disposed) return Future.value(const PagedState());
+    if (_entries[query] == null) _warnUncachedEdge(query, forward);
     final e = _entryFor(query);
     final head = e.head;
     if (head != null) return head.future;
@@ -1424,6 +1441,24 @@ class ReactivePagedManager<Q, T, C extends Object> {
         '$query (${direction.name}); the edge is treated as exhausted. Check '
         'that the fetcher returns a null cursor at the end of the list, or '
         'raise maxUnproductivePages.',
+        name: 'reactive_data_manager',
+        level: 900, // WARNING
+      );
+      return true;
+    }());
+  }
+
+  /// Debug builds only: tells the developer that `loadNext`/`loadPrevious`
+  /// was called for a query that is not cached, so it starts a first-page
+  /// load instead of loading the next/previous page.
+  void _warnUncachedEdge(Q query, bool forward) {
+    assert(() {
+      final method = forward ? 'loadNext' : 'loadPrevious';
+      developer.log(
+        '$method was called for query $query, which is not cached; it loads '
+        'the first page instead (an extra request and an unwatched entry). '
+        'Usually the query is not equal to the one passed to watch (check its '
+        '== and hashCode).',
         name: 'reactive_data_manager',
         level: 900, // WARNING
       );

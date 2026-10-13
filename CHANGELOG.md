@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.1.0 (2026-10-13)
+
+### Changed
+- **The package is pure Dart.** The `flutter` SDK dependency and the `flutter` environment constraint were removed (`lib/` never imported Flutter), so `PagedState`, `DataState` and the managers can be used from Flutter-free code such as a domain layer, and the package resolves with plain `dart pub get`. Flutter apps use it exactly as before. The tests moved from `flutter_test` to `package:test` and run with `dart test`.
+- **`ReactivePagedManager.watch` emits the loading state first.** When `watch` (default `fetch: true`) starts a first-page load (nothing loaded yet, or stale), the load now starts before the first emission, so the first state already has `isRefreshing: true` (`isLoadingInitial` for a new query) instead of an idle empty state followed immediately by a loading one. An idle state with nothing loaded (`!hasLoaded && !isRefreshing`) now only means `watch(fetch: false)` or a reset by `evict`/`clearCache`, which are unchanged. For a stale query the first state is its items with `isRefreshing: true`. Code that skipped the first emission to ignore the idle state should stop doing so.
+
+### Added
+- `loadNext`/`loadPrevious` on a query that is not cached: debug builds log a warning through `dart:developer` (name `reactive_data_manager`), because such a call silently caches the query and loads its *first* page (usually the query is not equal to the watched one). The behaviour itself is unchanged and is now documented on both methods and in the README.
+- README recipe "Detecting a newly failed load (toasts)": diffing `refreshError`/`next.error`/`previous.error` against the previous state (plain Dart and rxdart `pairwise()`), including how `PagedError` value equality behaves.
+
+### Not implemented
+- Per-query retention/eviction policy (`policyFor(query)` for `retainWhenUnwatched`, `maxEntries`, `evictAfterUnwatched`): deferred. Use one manager per policy for now.
+- No `createIfMissing` option on `loadNext`/`loadPrevious`, no `cleared`/reset marker on `PagedState` and no `failures(query)` stream; the warning, the first-emission change and the README recipe cover these cases.
+
 ## 2.0.0 (2026-10-12)
 
 This release contains everything since 1.1.0 (the 1.2.0 and 1.3.0 changes were

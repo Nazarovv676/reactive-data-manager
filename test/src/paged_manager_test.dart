@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter_test/flutter_test.dart';
+import 'package:test/test.dart';
 import 'package:reactive_data_manager/reactive_data_manager.dart';
 
 typedef Item = ({String id, int v});
@@ -718,6 +718,151 @@ void main() {
       expect(s.reqs.last.cursor, 2); // back to page 2
       s.ok(2, items(['c']));
       await again;
+    });
+  });
+
+  group('loadNext / loadPrevious on an uncached query', () {
+    for (final forward in [true, false]) {
+      final name = forward ? 'loadNext' : 'loadPrevious';
+
+      test('$name caches the query and loads its first page', () async {
+        final s = Script();
+        final m = make(s);
+        expect(m.peek('q'), isNull);
+        final f = forward ? m.loadNext('q') : m.loadPrevious('q');
+        expect(m.cachedQueries, ['q']);
+        expect(m.peek('q')!.isLoadingInitial, isTrue);
+        expect(s.reqs.single.direction, PageDirection.initial);
+        expect(s.reqs.single.cursor, isNull);
+        s.ok(0, items(['a']), next: 2);
+        final st = await f;
+        expect(st.items, items(['a']));
+        expect(st.hasLoaded, isTrue);
+      });
+
+      test('$name on a cached but unloaded query also loads the first page',
+          () async {
+        final s = Script();
+        final m = make(s);
+        await m.watch('q', fetch: false).first; // cached, nothing loaded
+        final f = forward ? m.loadNext('q') : m.loadPrevious('q');
+        expect(s.reqs.single.direction, PageDirection.initial);
+        s.ok(0, items(['a']));
+        expect((await f).items, items(['a']));
+      });
+    }
+  });
+
+  group('watch: first emission', () {
+    bool idleEmpty(PagedState<Item> s) => !s.hasLoaded && !s.isRefreshing;
+
+    test('a new query emits a loading state first (isRefreshing)', () async {
+      final s = Script();
+      final m = make(s);
+      final states = <PagedState<Item>>[];
+      final sub = m.watch('q').listen(states.add);
+      await pump();
+      expect(states, isNotEmpty);
+      expect(states.first.isRefreshing, isTrue);
+      expect(states.first.isLoadingInitial, isTrue);
+      expect(states.first.hasLoaded, isFalse);
+      s.ok(0, items(['a']));
+      await pump();
+      expect(states.last.items, items(['a']));
+      expect(states.last.isRefreshing, isFalse);
+      // no idle empty state before the load
+      expect(states.where(idleEmpty), isEmpty);
+      await sub.cancel();
+    });
+
+    test('never emits an idle state immediately followed by a loading one',
+        () async {
+      final s = Script();
+      final m = make(s);
+      final states = <PagedState<Item>>[];
+      final sub = m.watch('q').listen(states.add);
+      await pump();
+      s.ok(0, items(['a']));
+      await pump();
+      for (var i = 1; i < states.length; i++) {
+        final pair = (states[i - 1], states[i]);
+        expect(
+          !pair.$1.isRefreshing && pair.$2.isRefreshing,
+          isFalse,
+          reason: 'idle -> loading at $i: $states',
+        );
+      }
+      expect(states.first, states.firstWhere((x) => x.isRefreshing));
+      await sub.cancel();
+    });
+
+    test('an unloaded entry created by another call also starts loading',
+        () async {
+      final s = Script();
+      final m = make(s);
+      // cached but never loaded
+      await m.watch('q', fetch: false).first;
+      expect(m.peek('q')!.hasLoaded, isFalse);
+      expect(m.peek('q')!.isRefreshing, isFalse);
+      final first = await m.watch('q').first;
+      expect(first.isLoadingInitial, isTrue);
+      expect(s.reqs, hasLength(1));
+    });
+
+    test('watch(fetch: false) still emits the idle state first', () async {
+      final s = Script();
+      final m = make(s);
+      final first = await m.watch('q', fetch: false).first;
+      expect(first.isRefreshing, isFalse);
+      expect(first.hasLoaded, isFalse);
+      expect(first.isLoadingInitial, isFalse);
+      expect(s.reqs, isEmpty);
+    });
+
+    test('a stale watched query emits its items with isRefreshing first',
+        () async {
+      var now = DateTime(2026);
+      final s = Script();
+      final m = make(s, maxAge: const Duration(minutes: 1), clock: () => now);
+      await seed(m, s, 'q', items(['a']));
+      now = now.add(const Duration(minutes: 2));
+      final first = await m.watch('q').first;
+      expect(first.items, items(['a']));
+      expect(first.isRefreshing, isTrue);
+    });
+
+    test('after evict a watched query emits an idle reset state', () async {
+      final s = Script();
+      final m = make(s);
+      final states = <PagedState<Item>>[];
+      final sub = m.watch('q').listen(states.add);
+      await pump();
+      s.ok(0, items(['a']));
+      await pump();
+      expect(states.where(idleEmpty), isEmpty);
+      m.evict('q');
+      await pump();
+      final reset = states.last;
+      expect(reset.isRefreshing, isFalse); // distinguishable from "loading"
+      expect(reset.hasLoaded, isFalse);
+      expect(reset.items, isEmpty);
+      expect(idleEmpty(reset), isTrue);
+      expect(s.reqs, hasLength(1)); // no refetch
+      await sub.cancel();
+    });
+
+    test('after clearCache a watched query emits an idle reset state',
+        () async {
+      final s = Script();
+      final m = make(s);
+      final states = <PagedState<Item>>[];
+      final sub = m.watch('q').listen(states.add);
+      await pump();
+      m.clearCache(); // discards the in-flight first load
+      await pump();
+      expect(states.first.isRefreshing, isTrue);
+      expect(idleEmpty(states.last), isTrue);
+      await sub.cancel();
     });
   });
 
